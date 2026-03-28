@@ -1,0 +1,33 @@
+{
+    "name": "workflow-plugin-infra",
+    "version": "0.1.0",
+    "description": "Abstract infra.* module types (13 types) with IaCProvider delegation",
+    "author": "GoCodeAlone",
+    "license": "MIT",
+    "type": "external",
+    "tier": "community",
+    "minEngineVersion": "0.5.0",
+    "keywords": ["infra", "iac", "infrastructure", "kubernetes", "database", "vpc", "dns"],
+    "homepage": "https://github.com/GoCodeAlone/workflow-plugin-infra",
+    "repository": "https://github.com/GoCodeAlone/workflow-plugin-infra",
+    "capabilities": {
+        "configProvider": false,
+        "moduleTypes": [
+            "infra.container_service",
+            "infra.k8s_cluster",
+            "infra.database",
+            "infra.cache",
+            "infra.vpc",
+            "infra.load_balancer",
+            "infra.dns",
+            "infra.registry",
+            "infra.api_gateway",
+            "infra.firewall",
+            "infra.iam_role",
+            "infra.storage",
+            "infra.certificate"
+        ],
+        "stepTypes": [],
+        "triggerTypes": []
+    }
+}

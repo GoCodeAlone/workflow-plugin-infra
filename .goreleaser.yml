@@ -1,0 +1,32 @@
+version: 2
+project_name: workflow-plugin-infra
+before:
+  hooks:
+    - go mod tidy
+builds:
+  - id: workflow-plugin-infra
+    main: ./cmd/workflow-plugin-infra
+    binary: workflow-plugin-infra
+    env:
+      - CGO_ENABLED=0
+      - GOPRIVATE=github.com/GoCodeAlone/*
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+archives:
+  - id: archive
+    format: tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    format_overrides:
+      - goos: windows
+        format: zip
+checksum:
+  name_template: "{{ .ProjectName }}_{{ .Version }}_checksums.txt"
+release:
+  github:
+    owner: GoCodeAlone
+    name: workflow-plugin-infra
