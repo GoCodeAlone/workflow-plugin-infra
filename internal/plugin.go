@@ -24,22 +24,32 @@ import (
 // unreleased dev builds; goreleaser overrides with the real release tag.
 var Version = "0.0.0"
 
-// infraTypes is the complete list of abstract infrastructure resource types.
-var infraTypes = []string{
-	"infra.container_service",
-	"infra.k8s_cluster",
-	"infra.database",
-	"infra.cache",
-	"infra.vpc",
-	"infra.load_balancer",
-	"infra.dns",
-	"infra.registry",
-	"infra.api_gateway",
-	"infra.firewall",
-	"infra.iam_role",
-	"infra.storage",
-	"infra.certificate",
+type infraModuleDefinition struct {
+	typeName      string
+	configMessage string
+	createTyped   func(typeName, name string, config *anypb.Any) (sdk.ModuleInstance, error)
 }
+
+var infraModuleDefinitions = []infraModuleDefinition{
+	typedInfraModuleDefinition("infra.container_service", "ContainerServiceConfig", &contracts.ContainerServiceConfig{}),
+	typedInfraModuleDefinition("infra.k8s_cluster", "K8SClusterConfig", &contracts.K8SClusterConfig{}),
+	typedInfraModuleDefinition("infra.database", "DatabaseConfig", &contracts.DatabaseConfig{}),
+	typedInfraModuleDefinition("infra.cache", "CacheConfig", &contracts.CacheConfig{}),
+	typedInfraModuleDefinition("infra.vpc", "VPCConfig", &contracts.VPCConfig{}),
+	typedInfraModuleDefinition("infra.load_balancer", "LoadBalancerConfig", &contracts.LoadBalancerConfig{}),
+	typedInfraModuleDefinition("infra.dns", "DNSConfig", &contracts.DNSConfig{}),
+	typedInfraModuleDefinition("infra.registry", "RegistryConfig", &contracts.RegistryConfig{}),
+	typedInfraModuleDefinition("infra.api_gateway", "APIGatewayConfig", &contracts.APIGatewayConfig{}),
+	typedInfraModuleDefinition("infra.firewall", "FirewallConfig", &contracts.FirewallConfig{}),
+	typedInfraModuleDefinition("infra.iam_role", "IAMRoleConfig", &contracts.IAMRoleConfig{}),
+	typedInfraModuleDefinition("infra.storage", "StorageConfig", &contracts.StorageConfig{}),
+	typedInfraModuleDefinition("infra.certificate", "CertificateConfig", &contracts.CertificateConfig{}),
+}
+
+// infraTypes is the complete list of abstract infrastructure resource types.
+var infraTypes = moduleTypesFromDefinitions(infraModuleDefinitions)
+
+var infraContractRegistry = buildContractRegistry(infraModuleDefinitions)
 
 // infraPlugin implements sdk.PluginProvider, sdk.TypedModuleProvider, and sdk.ContractProvider.
 type infraPlugin struct{}
@@ -81,48 +91,22 @@ func (p *infraPlugin) TypedModuleTypes() []string {
 
 // CreateTypedModule creates a typed module instance of the given type.
 func (p *infraPlugin) CreateTypedModule(typeName, name string, config *anypb.Any) (sdk.ModuleInstance, error) {
-	switch typeName {
-	case "infra.container_service":
-		factory := typedModuleFactory(typeName, &contracts.ContainerServiceConfig{})
-		return factory.CreateTypedModule(typeName, name, config)
-	case "infra.k8s_cluster":
-		factory := typedModuleFactory(typeName, &contracts.K8SClusterConfig{})
-		return factory.CreateTypedModule(typeName, name, config)
-	case "infra.database":
-		factory := typedModuleFactory(typeName, &contracts.DatabaseConfig{})
-		return factory.CreateTypedModule(typeName, name, config)
-	case "infra.cache":
-		factory := typedModuleFactory(typeName, &contracts.CacheConfig{})
-		return factory.CreateTypedModule(typeName, name, config)
-	case "infra.vpc":
-		factory := typedModuleFactory(typeName, &contracts.VPCConfig{})
-		return factory.CreateTypedModule(typeName, name, config)
-	case "infra.load_balancer":
-		factory := typedModuleFactory(typeName, &contracts.LoadBalancerConfig{})
-		return factory.CreateTypedModule(typeName, name, config)
-	case "infra.dns":
-		factory := typedModuleFactory(typeName, &contracts.DNSConfig{})
-		return factory.CreateTypedModule(typeName, name, config)
-	case "infra.registry":
-		factory := typedModuleFactory(typeName, &contracts.RegistryConfig{})
-		return factory.CreateTypedModule(typeName, name, config)
-	case "infra.api_gateway":
-		factory := typedModuleFactory(typeName, &contracts.APIGatewayConfig{})
-		return factory.CreateTypedModule(typeName, name, config)
-	case "infra.firewall":
-		factory := typedModuleFactory(typeName, &contracts.FirewallConfig{})
-		return factory.CreateTypedModule(typeName, name, config)
-	case "infra.iam_role":
-		factory := typedModuleFactory(typeName, &contracts.IAMRoleConfig{})
-		return factory.CreateTypedModule(typeName, name, config)
-	case "infra.storage":
-		factory := typedModuleFactory(typeName, &contracts.StorageConfig{})
-		return factory.CreateTypedModule(typeName, name, config)
-	case "infra.certificate":
-		factory := typedModuleFactory(typeName, &contracts.CertificateConfig{})
-		return factory.CreateTypedModule(typeName, name, config)
-	default:
-		return nil, fmt.Errorf("infra plugin: unknown module type %q", typeName)
+	for _, definition := range infraModuleDefinitions {
+		if definition.typeName == typeName {
+			return definition.createTyped(typeName, name, config)
+		}
+	}
+	return nil, fmt.Errorf("infra plugin: unknown module type %q", typeName)
+}
+
+func typedInfraModuleDefinition[C proto.Message](typeName, configMessage string, configPrototype C) infraModuleDefinition {
+	return infraModuleDefinition{
+		typeName:      typeName,
+		configMessage: configMessage,
+		createTyped: func(typeName, name string, config *anypb.Any) (sdk.ModuleInstance, error) {
+			factory := typedModuleFactory(typeName, configPrototype)
+			return factory.CreateTypedModule(typeName, name, config)
+		},
 	}
 }
 
@@ -148,6 +132,14 @@ func (p *infraPlugin) CreateStep(typeName, name string, _ map[string]any) (sdk.S
 
 // ContractRegistry returns strict protobuf descriptors for plugin module boundaries.
 func (p *infraPlugin) ContractRegistry() *pb.ContractRegistry {
+	return infraContractRegistry
+}
+
+func buildContractRegistry(definitions []infraModuleDefinition) *pb.ContractRegistry {
+	descriptors := make([]*pb.ContractDescriptor, 0, len(definitions))
+	for _, definition := range definitions {
+		descriptors = append(descriptors, moduleContract(definition.typeName, definition.configMessage))
+	}
 	return &pb.ContractRegistry{
 		FileDescriptorSet: &descriptorpb.FileDescriptorSet{
 			File: []*descriptorpb.FileDescriptorProto{
@@ -155,22 +147,16 @@ func (p *infraPlugin) ContractRegistry() *pb.ContractRegistry {
 				protodesc.ToFileDescriptorProto(contracts.File_internal_contracts_infra_proto),
 			},
 		},
-		Contracts: []*pb.ContractDescriptor{
-			moduleContract("infra.container_service", "ContainerServiceConfig"),
-			moduleContract("infra.k8s_cluster", "K8SClusterConfig"),
-			moduleContract("infra.database", "DatabaseConfig"),
-			moduleContract("infra.cache", "CacheConfig"),
-			moduleContract("infra.vpc", "VPCConfig"),
-			moduleContract("infra.load_balancer", "LoadBalancerConfig"),
-			moduleContract("infra.dns", "DNSConfig"),
-			moduleContract("infra.registry", "RegistryConfig"),
-			moduleContract("infra.api_gateway", "APIGatewayConfig"),
-			moduleContract("infra.firewall", "FirewallConfig"),
-			moduleContract("infra.iam_role", "IAMRoleConfig"),
-			moduleContract("infra.storage", "StorageConfig"),
-			moduleContract("infra.certificate", "CertificateConfig"),
-		},
+		Contracts: descriptors,
 	}
+}
+
+func moduleTypesFromDefinitions(definitions []infraModuleDefinition) []string {
+	types := make([]string, 0, len(definitions))
+	for _, definition := range definitions {
+		types = append(types, definition.typeName)
+	}
+	return types
 }
 
 func moduleContract(moduleType, configMessage string) *pb.ContractDescriptor {
