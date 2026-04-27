@@ -4,9 +4,18 @@ package internal
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
+	"github.com/GoCodeAlone/workflow-plugin-infra/internal/contracts"
+	pb "github.com/GoCodeAlone/workflow/plugin/external/proto"
 	sdk "github.com/GoCodeAlone/workflow/plugin/external/sdk"
+	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protodesc"
+	"google.golang.org/protobuf/types/descriptorpb"
+	"google.golang.org/protobuf/types/known/anypb"
+	"google.golang.org/protobuf/types/known/structpb"
 )
 
 // Version is set at build time via -ldflags
@@ -15,24 +24,34 @@ import (
 // unreleased dev builds; goreleaser overrides with the real release tag.
 var Version = "0.0.0"
 
-// infraTypes is the complete list of abstract infrastructure resource types.
-var infraTypes = []string{
-	"infra.container_service",
-	"infra.k8s_cluster",
-	"infra.database",
-	"infra.cache",
-	"infra.vpc",
-	"infra.load_balancer",
-	"infra.dns",
-	"infra.registry",
-	"infra.api_gateway",
-	"infra.firewall",
-	"infra.iam_role",
-	"infra.storage",
-	"infra.certificate",
+type infraModuleDefinition struct {
+	typeName      string
+	configMessage string
+	createTyped   func(typeName, name string, config *anypb.Any) (sdk.ModuleInstance, error)
 }
 
-// infraPlugin implements sdk.PluginProvider.
+var infraModuleDefinitions = []infraModuleDefinition{
+	typedInfraModuleDefinition("infra.container_service", "ContainerServiceConfig", &contracts.ContainerServiceConfig{}),
+	typedInfraModuleDefinition("infra.k8s_cluster", "K8SClusterConfig", &contracts.K8SClusterConfig{}),
+	typedInfraModuleDefinition("infra.database", "DatabaseConfig", &contracts.DatabaseConfig{}),
+	typedInfraModuleDefinition("infra.cache", "CacheConfig", &contracts.CacheConfig{}),
+	typedInfraModuleDefinition("infra.vpc", "VPCConfig", &contracts.VPCConfig{}),
+	typedInfraModuleDefinition("infra.load_balancer", "LoadBalancerConfig", &contracts.LoadBalancerConfig{}),
+	typedInfraModuleDefinition("infra.dns", "DNSConfig", &contracts.DNSConfig{}),
+	typedInfraModuleDefinition("infra.registry", "RegistryConfig", &contracts.RegistryConfig{}),
+	typedInfraModuleDefinition("infra.api_gateway", "APIGatewayConfig", &contracts.APIGatewayConfig{}),
+	typedInfraModuleDefinition("infra.firewall", "FirewallConfig", &contracts.FirewallConfig{}),
+	typedInfraModuleDefinition("infra.iam_role", "IAMRoleConfig", &contracts.IAMRoleConfig{}),
+	typedInfraModuleDefinition("infra.storage", "StorageConfig", &contracts.StorageConfig{}),
+	typedInfraModuleDefinition("infra.certificate", "CertificateConfig", &contracts.CertificateConfig{}),
+}
+
+// infraTypes is the complete list of abstract infrastructure resource types.
+var infraTypes = moduleTypesFromDefinitions(infraModuleDefinitions)
+
+var infraContractRegistry = buildContractRegistry(infraModuleDefinitions)
+
+// infraPlugin implements sdk.PluginProvider, sdk.TypedModuleProvider, and sdk.ContractProvider.
 type infraPlugin struct{}
 
 // NewInfraPlugin returns a new infraPlugin instance.
@@ -52,7 +71,7 @@ func (p *infraPlugin) Manifest() sdk.PluginManifest {
 
 // ModuleTypes returns the module type names this plugin provides.
 func (p *infraPlugin) ModuleTypes() []string {
-	return infraTypes
+	return append([]string(nil), infraTypes...)
 }
 
 // CreateModule creates a module instance of the given type.
@@ -65,6 +84,42 @@ func (p *infraPlugin) CreateModule(typeName, name string, config map[string]any)
 	return nil, fmt.Errorf("infra plugin: unknown module type %q", typeName)
 }
 
+// TypedModuleTypes returns the protobuf-typed module type names this plugin provides.
+func (p *infraPlugin) TypedModuleTypes() []string {
+	return p.ModuleTypes()
+}
+
+// CreateTypedModule creates a typed module instance of the given type.
+func (p *infraPlugin) CreateTypedModule(typeName, name string, config *anypb.Any) (sdk.ModuleInstance, error) {
+	for _, definition := range infraModuleDefinitions {
+		if definition.typeName == typeName {
+			return definition.createTyped(typeName, name, config)
+		}
+	}
+	return nil, fmt.Errorf("infra plugin: unknown module type %q", typeName)
+}
+
+func typedInfraModuleDefinition[C proto.Message](typeName, configMessage string, configPrototype C) infraModuleDefinition {
+	return infraModuleDefinition{
+		typeName:      typeName,
+		configMessage: configMessage,
+		createTyped: func(typeName, name string, config *anypb.Any) (sdk.ModuleInstance, error) {
+			factory := typedModuleFactory(typeName, configPrototype)
+			return factory.CreateTypedModule(typeName, name, config)
+		},
+	}
+}
+
+func typedModuleFactory[C proto.Message](typeName string, configPrototype C) *sdk.TypedModuleFactory[C] {
+	return sdk.NewTypedModuleFactory(typeName, configPrototype, func(name string, cfg C) (sdk.ModuleInstance, error) {
+		config, err := protoMessageToMap(cfg)
+		if err != nil {
+			return nil, err
+		}
+		return &infraModule{name: name, infraType: typeName, config: config}, nil
+	})
+}
+
 // StepTypes returns the step type names this plugin provides.
 func (p *infraPlugin) StepTypes() []string {
 	return []string{}
@@ -73,6 +128,60 @@ func (p *infraPlugin) StepTypes() []string {
 // CreateStep creates a step instance of the given type.
 func (p *infraPlugin) CreateStep(typeName, name string, _ map[string]any) (sdk.StepInstance, error) {
 	return nil, fmt.Errorf("infra plugin: unknown step type %q", typeName)
+}
+
+// ContractRegistry returns strict protobuf descriptors for plugin module boundaries.
+func (p *infraPlugin) ContractRegistry() *pb.ContractRegistry {
+	return infraContractRegistry
+}
+
+func buildContractRegistry(definitions []infraModuleDefinition) *pb.ContractRegistry {
+	descriptors := make([]*pb.ContractDescriptor, 0, len(definitions))
+	for _, definition := range definitions {
+		descriptors = append(descriptors, moduleContract(definition.typeName, definition.configMessage))
+	}
+	return &pb.ContractRegistry{
+		FileDescriptorSet: &descriptorpb.FileDescriptorSet{
+			File: []*descriptorpb.FileDescriptorProto{
+				protodesc.ToFileDescriptorProto(structpb.File_google_protobuf_struct_proto),
+				protodesc.ToFileDescriptorProto(contracts.File_internal_contracts_infra_proto),
+			},
+		},
+		Contracts: descriptors,
+	}
+}
+
+func moduleTypesFromDefinitions(definitions []infraModuleDefinition) []string {
+	types := make([]string, 0, len(definitions))
+	for _, definition := range definitions {
+		types = append(types, definition.typeName)
+	}
+	return types
+}
+
+func moduleContract(moduleType, configMessage string) *pb.ContractDescriptor {
+	const pkg = "workflow.plugins.infra.v1."
+	return &pb.ContractDescriptor{
+		Kind:          pb.ContractKind_CONTRACT_KIND_MODULE,
+		ModuleType:    moduleType,
+		ConfigMessage: pkg + configMessage,
+		Mode:          pb.ContractMode_CONTRACT_MODE_STRICT_PROTO,
+	}
+}
+
+func protoMessageToMap(msg proto.Message) (map[string]any, error) {
+	if msg == nil {
+		return nil, nil
+	}
+	raw, err := (protojson.MarshalOptions{UseProtoNames: true}).Marshal(msg)
+	if err != nil {
+		return nil, err
+	}
+	var values map[string]any
+	if err := json.Unmarshal(raw, &values); err != nil {
+		return nil, err
+	}
+	return values, nil
 }
 
 // ─── Module ───────────────────────────────────────────────────────────────────

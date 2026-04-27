@@ -6,10 +6,42 @@
     "license": "MIT",
     "type": "external",
     "tier": "community",
-    "minEngineVersion": "0.5.0",
+    "minEngineVersion": "0.19.0",
     "keywords": ["infra", "iac", "infrastructure", "kubernetes", "database", "vpc", "dns"],
     "homepage": "https://github.com/GoCodeAlone/workflow-plugin-infra",
     "repository": "https://github.com/GoCodeAlone/workflow-plugin-infra",
+    "downloads": [
+        {
+            "os": "linux",
+            "arch": "amd64",
+            "url": "https://github.com/GoCodeAlone/workflow-plugin-infra/releases/download/v0.1.0/workflow-plugin-infra_0.1.0_linux_amd64.tar.gz"
+        },
+        {
+            "os": "linux",
+            "arch": "arm64",
+            "url": "https://github.com/GoCodeAlone/workflow-plugin-infra/releases/download/v0.1.0/workflow-plugin-infra_0.1.0_linux_arm64.tar.gz"
+        },
+        {
+            "os": "darwin",
+            "arch": "amd64",
+            "url": "https://github.com/GoCodeAlone/workflow-plugin-infra/releases/download/v0.1.0/workflow-plugin-infra_0.1.0_darwin_amd64.tar.gz"
+        },
+        {
+            "os": "darwin",
+            "arch": "arm64",
+            "url": "https://github.com/GoCodeAlone/workflow-plugin-infra/releases/download/v0.1.0/workflow-plugin-infra_0.1.0_darwin_arm64.tar.gz"
+        },
+        {
+            "os": "windows",
+            "arch": "amd64",
+            "url": "https://github.com/GoCodeAlone/workflow-plugin-infra/releases/download/v0.1.0/workflow-plugin-infra_0.1.0_windows_amd64.tar.gz"
+        },
+        {
+            "os": "windows",
+            "arch": "arm64",
+            "url": "https://github.com/GoCodeAlone/workflow-plugin-infra/releases/download/v0.1.0/workflow-plugin-infra_0.1.0_windows_arm64.tar.gz"
+        }
+    ],
     "capabilities": {
         "configProvider": false,
         "moduleTypes": [

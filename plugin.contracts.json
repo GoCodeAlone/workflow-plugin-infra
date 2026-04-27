@@ -1,0 +1,83 @@
+{
+  "version": "v1",
+  "contracts": [
+    {
+      "kind": "module",
+      "type": "infra.container_service",
+      "mode": "strict",
+      "config": "workflow.plugins.infra.v1.ContainerServiceConfig"
+    },
+    {
+      "kind": "module",
+      "type": "infra.k8s_cluster",
+      "mode": "strict",
+      "config": "workflow.plugins.infra.v1.K8SClusterConfig"
+    },
+    {
+      "kind": "module",
+      "type": "infra.database",
+      "mode": "strict",
+      "config": "workflow.plugins.infra.v1.DatabaseConfig"
+    },
+    {
+      "kind": "module",
+      "type": "infra.cache",
+      "mode": "strict",
+      "config": "workflow.plugins.infra.v1.CacheConfig"
+    },
+    {
+      "kind": "module",
+      "type": "infra.vpc",
+      "mode": "strict",
+      "config": "workflow.plugins.infra.v1.VPCConfig"
+    },
+    {
+      "kind": "module",
+      "type": "infra.load_balancer",
+      "mode": "strict",
+      "config": "workflow.plugins.infra.v1.LoadBalancerConfig"
+    },
+    {
+      "kind": "module",
+      "type": "infra.dns",
+      "mode": "strict",
+      "config": "workflow.plugins.infra.v1.DNSConfig"
+    },
+    {
+      "kind": "module",
+      "type": "infra.registry",
+      "mode": "strict",
+      "config": "workflow.plugins.infra.v1.RegistryConfig"
+    },
+    {
+      "kind": "module",
+      "type": "infra.api_gateway",
+      "mode": "strict",
+      "config": "workflow.plugins.infra.v1.APIGatewayConfig"
+    },
+    {
+      "kind": "module",
+      "type": "infra.firewall",
+      "mode": "strict",
+      "config": "workflow.plugins.infra.v1.FirewallConfig"
+    },
+    {
+      "kind": "module",
+      "type": "infra.iam_role",
+      "mode": "strict",
+      "config": "workflow.plugins.infra.v1.IAMRoleConfig"
+    },
+    {
+      "kind": "module",
+      "type": "infra.storage",
+      "mode": "strict",
+      "config": "workflow.plugins.infra.v1.StorageConfig"
+    },
+    {
+      "kind": "module",
+      "type": "infra.certificate",
+      "mode": "strict",
+      "config": "workflow.plugins.infra.v1.CertificateConfig"
+    }
+  ]
+}
