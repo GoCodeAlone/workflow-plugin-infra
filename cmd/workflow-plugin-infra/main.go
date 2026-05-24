@@ -8,5 +8,5 @@ import (
 )
 
 func main() {
-	sdk.Serve(internal.NewInfraPlugin())
+	sdk.Serve(internal.NewInfraPlugin(), sdk.WithBuildVersion(sdk.ResolveBuildVersion(internal.Version)))
 }
