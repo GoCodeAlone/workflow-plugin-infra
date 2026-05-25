@@ -146,8 +146,14 @@ The original cycle-1 design assumed an `IaCProvider` gRPC delegation chain that 
 ```go
 // internal/dnspolicy/types.go
 type DNSPolicyReader interface {
-    GetTXT(ctx context.Context, name string) ([]string, error)  // read policy RRs
+    GetTXT(ctx context.Context, name string) ([]string, error)  // read policy RRs (gate path)
     UpsertTXT(ctx context.Context, name string, values []string, ttl int) error  // write policy (bootstrap path only)
+}
+
+// internal/dnspolicy/writer.go — SEPARATE interface for post-gate DNS record mutation
+type DNSRecordWriter interface {
+    UpsertRecord(ctx context.Context, zone, name, recordType, data string, ttl, priority int32) (recordID string, err error)
+    DeleteRecord(ctx context.Context, zone, name, recordType string) error
 }
 
 // internal/dnsprovider/adapter.go (THIS is the libdns boundary)
@@ -156,27 +162,41 @@ package dnsprovider
 import (
     "github.com/libdns/digitalocean"
     "github.com/libdns/cloudflare"
-    // hover NOT in libdns — use workflow-plugin-hover gRPC instead
-    // see "Provider coverage matrix" below
 )
 
-func NewAdapter(provider, token string) (dnspolicy.DNSPolicyReader, error) { ... }
+// Adapter implements BOTH DNSPolicyReader (policy TXT R/W) AND DNSRecordWriter (arbitrary record R/W).
+type Adapter interface {
+    dnspolicy.DNSPolicyReader
+    dnspolicy.DNSRecordWriter
+}
+
+// NewAdapter uses a credentials MAP (not a single token) to support providers
+// with multi-part auth in future (Route53, GCP, Azure). v1 single-token
+// providers populate map with one key (e.g. {"token": "xxx"}).
+// (Closes adversarial cycle-5 I-1 — single-token signature was wrong for IAM-based providers.)
+func NewAdapter(provider string, creds map[string]string) (Adapter, error) { ... }
+
+// Apply is the post-gate DNS mutation entry point used by the infra.dns_record step.
+// (Closes adversarial cycle-5 C-2 — Apply was previously phantom.)
+func Apply(ctx context.Context, a Adapter, cfg *contracts.DNSRecordStepConfig, input *contracts.DNSRecordStepInput) (*sdk.TypedStepResult[*contracts.DNSRecordStepOutput], error)
 ```
 
-**Provider coverage matrix** (revised honestly per cycle-2 I-1):
+**Provider coverage matrix** (v1 scope honest — closes cycle-5 I-1 + I-2):
 
-| Provider | Adapter source | Status |
-|---|---|---|
-| DigitalOcean | `libdns/digitalocean` | ✓ exists |
-| Cloudflare | `libdns/cloudflare` | ✓ exists |
-| Namecheap | `libdns/namecheap` | ✓ exists |
-| Route53 (AWS) | `libdns/route53` | ✓ exists |
-| GCP Cloud DNS | `libdns/googleclouddns` | ✓ exists |
-| Azure DNS | `libdns/azure` | ✓ exists |
-| **Hover** | DEFERRED to v2 | The Hover client is 508 lines (not ~80 as cycle-3 design claimed); the adapter requires multi-step logic (`GetDomain → ListRecords → Create/Update`), uses cookie-based session auth (username + password + TOTP, NOT a single API token), and breaks the `NewAdapter(provider, token string)` signature. v1 ships with single-API-token providers only. v2 either (a) extracts `pkg/hoverclient` from workflow-plugin-hover + extends `NewAdapter` to accept a structured credentials object, or (b) adds an inline `dnsprovider.HoverAdapter` with its own multi-cred constructor. **gocodealone-dns currently has 0 zones on Hover; deferring Hover from v1 has zero blast radius.** (Closes cycle-4 I-1+I-2 per reviewer Option 1.) |
-| GoDaddy | `libdns/godaddy` | ✓ exists |
+v1 ships with SINGLE-TOKEN auth providers only. Multi-credential providers (IAM, service-account, TOTP) deferred to v2 to land the gate behavior first without entangling per-provider auth complexity.
 
-Hover gap: `workflow-plugin-hover` already implements DNS read/write against Hover's account UI (no API). For v1, wrap its existing gRPC interface into the `DNSPolicyReader` interface within `internal/dnsprovider/hover.go`. No new Hover dependency needed.
+| Provider | Adapter source | v1 status | Reason |
+|---|---|---|---|
+| **DigitalOcean** | `libdns/digitalocean` | ✓ **v1 INCLUDED** | Single bearer token. `creds={"token":"<DO_TOKEN>"}`. |
+| **Cloudflare** | `libdns/cloudflare` | ✓ **v1 INCLUDED** | Single API token. `creds={"token":"<CF_TOKEN>"}`. |
+| Route53 (AWS) | `libdns/route53` | DEFERRED to v2 | Requires AWS access key + secret key (+ region), or IAM role (no token). Multi-cred via `creds={"access_key":..., "secret_key":..., "region":...}`. |
+| Namecheap | `libdns/namecheap` | DEFERRED to v2 | Requires API key + API user (two strings). |
+| GoDaddy | `libdns/godaddy` | DEFERRED to v2 | Requires API key + API secret (two strings). |
+| GCP Cloud DNS | `libdns/googleclouddns` | DEFERRED to v2 | Requires service-account JSON or ADC. |
+| Azure DNS | `libdns/azure` | DEFERRED to v2 | Requires service principal (tenant ID + client ID + client secret). |
+| **Hover** | NO libdns adapter | DEFERRED to v2 | 508-line client + multi-step `GetDomain → List → Upsert` adapter logic + username+password+TOTP cookie auth. **0 gocodealone-dns zones on Hover currently — zero blast radius from v1 deferral.** |
+
+**v1 scope = DO + Cloudflare.** The `NewAdapter(provider, creds map[string]string)` signature is future-proof for multi-cred providers; v2 adds adapters without breaking the v1 interface.
 
 **libdns dependency burden** (closes cycle-2 I-2): each libdns adapter is its own Go module. Isolating libdns imports to `internal/dnsprovider/` means:
 - API breakage in any libdns adapter only requires touching one file
@@ -197,9 +217,9 @@ The original cycle-2 design referenced `infra.dns_record` as if it existed — i
 
 // Static per-step config (resolved once at module construction).
 message DNSRecordStepConfig {
-  string provider           = 1; // "digitalocean" | "cloudflare" | "hover" | ...
-  string provider_token_ref = 2; // YAML secret reference (engine resolves)
-  string zone               = 3; // e.g. "gocodealone.tech"
+  string provider              = 1; // "digitalocean" | "cloudflare" (v1)
+  map<string, string> provider_creds = 2; // credentials map; v1 single-token: {"token":"<resolved>"}
+  string zone                  = 3; // e.g. "gocodealone.tech"
 }
 
 // Per-execution input (resolved per Execute call).
@@ -241,7 +261,8 @@ func (p *infraPlugin) TypedStepTypes() []string {
 }
 func (p *infraPlugin) CreateTypedStep(typeName, name string, config *anypb.Any) (sdk.StepInstance, error) {
     handler := func(ctx context.Context, req sdk.TypedStepRequest[*contracts.DNSRecordStepConfig, *contracts.DNSRecordStepInput]) (*sdk.TypedStepResult[*contracts.DNSRecordStepOutput], error) {
-        adapter, err := dnsprovider.NewAdapter(req.Config.Provider, req.Config.ProviderTokenRef)
+        // ProviderCreds field is map<string,string>; values resolved at config-load via ExpandEnvInMapPreservingVars
+        adapter, err := dnsprovider.NewAdapter(req.Config.Provider, req.Config.ProviderCreds)
         if err != nil { return nil, err }
         if gerr := dnsgate.Gate(ctx, adapter, req.Config.Zone, req.Input.Name, req.Input.RecordType, req.Input.Owner); gerr != nil {
             return &sdk.TypedStepResult[*contracts.DNSRecordStepOutput]{Output: &contracts.DNSRecordStepOutput{Status: "gate-denied", DenialReason: gerr.Error()}}, nil
@@ -328,25 +349,39 @@ This addresses adversarial C-2 (owner availability) by adding the config field, 
 
 ### Bootstrap path + admin CLI dispatch (revised — closes adversarial cycle-1 C-1 + cycle-3 C-2)
 
-**Command surface delivery via plugin-binary dispatch + plugin.json capabilities** (closes cycle-3 C-2 + cycle-4 C-2): correct mechanism per `plugin_cli_commands.go:122` + `BuildCLIRegistry()`:
+**Command surface delivery via single-binary `--wfctl-cli` dispatch** (closes cycle-3 C-2 + cycle-4 C-2 + cycle-5 C-1): correct mechanism per `plugin_cli_commands.go:148` + `DispatchCLICommand:165`:
 
-1. Ship a standalone binary `cmd/dns-policy-admin` (any name; not auto-detected by prefix) inside workflow-plugin-infra.
-2. `wfctl plugin install workflow-plugin-infra` extracts the plugin tarball to `<plugin-dir>/workflow-plugin-infra/` and (per existing rename logic) installs the main plugin binary as `<plugin-dir>/workflow-plugin-infra/workflow-plugin-infra`. The admin binary is shipped alongside as a second artifact: `<plugin-dir>/workflow-plugin-infra/dns-policy-admin`.
-3. Update `plugin.json` with `capabilities.cliCommands`:
+`BuildCLIRegistry` ALWAYS invokes the main plugin binary at `<plugin-dir>/workflow-plugin-infra/workflow-plugin-infra` (binary name = dir name = plugin short-name, hardcoded). There is NO `binary` field in `CLICommandDeclaration` — invented in cycle-4 design, never existed. Multi-binary dispatch is structurally impossible without engine changes (violates non-goal).
+
+**Resolution** (single binary, `--wfctl-cli` subcommand handler):
+
+1. Declare in `plugin.json.capabilities.cliCommands`:
 ```json
 {
   "capabilities": {
     "moduleTypes": [...],
     "stepTypes": ["infra.dns_record"],
     "cliCommands": [
-      { "name": "infra-dns", "description": "DNS ownership policy admin (set-policy, drift, transfer-ownership, policy show)", "binary": "dns-policy-admin" }
+      { "name": "infra-dns", "description": "DNS ownership policy admin (set-policy, drift, transfer-ownership, policy show)" }
     ]
   }
 }
 ```
-4. `BuildCLIRegistry(defaultPluginCommandDir())` reads `plugin.json.capabilities.cliCommands[]` and registers `wfctl infra-dns` → `<plugin-dir>/workflow-plugin-infra/dns-policy-admin`.
+2. `DispatchCLICommand` invokes: `<plugin-dir>/workflow-plugin-infra/workflow-plugin-infra --wfctl-cli infra-dns <subcommand> [args...]`
+3. The MAIN plugin binary's `main()` checks `os.Args` for the `--wfctl-cli` prefix:
+```go
+func main() {
+    if len(os.Args) > 1 && os.Args[1] == "--wfctl-cli" {
+        admincli.Run(os.Args[2:])  // admincli is a new internal package
+        return
+    }
+    // existing plugin-server startup path
+    sdk.ServeIaCPlugin(...)
+}
+```
+4. `internal/admincli/` implements the `infra-dns` subcommands using the SAME `internal/dnspolicy`, `internal/dnsprovider`, `internal/dnsgate` packages that the step uses. Code reuse, no duplicate logic.
 
-After install, operator gains:
+After install, operator gains (note: single binary handles both the plugin-server role AND the admin CLI role; `wfctl infra-dns` dispatches via `--wfctl-cli`):
 
 ```
 wfctl infra-dns set-policy <zone> -f ownership/<zone>.yaml --as-owner sre
@@ -356,17 +391,30 @@ wfctl infra-dns drift <zone>
 wfctl infra-dns policy show <zone>
 ```
 
-Zero changes to wfctl core. The admin binary is built by the plugin's goreleaser config (added to existing `builds:` block); `wfctl plugin install` already handles placement of multi-binary plugin payloads.
+Zero changes to wfctl core. Zero new binaries (the existing main plugin binary handles both roles based on `--wfctl-cli` sentinel).
 
 **Reserved-name check**: `wfctl infra-dns` does NOT collide with the existing `wfctl infra` subcommand because dispatch keys are exact-match (`commands["infra"]` vs `commands["infra-dns"]`). Verified clean.
 
-**Bootstrap flow** (gate-bypass details):
-1. Operator runs `wfctl infra-dns set-policy <zone> -f ownership/<zone>.yaml --as-owner sre`.
-2. The standalone binary (NOT the `infra.dns_record` step) loads the YAML policy, calls `dnspolicy.Serialize`, then calls `dnsprovider.NewAdapter(provider, token).UpsertTXT("_workflow-dns-policy."+zone, serialized, 60)`.
-3. NO gate check — bootstrap is the gate's exception. Trust check is the provider API token (whoever holds the token may write).
-4. Audit entry written via `slog` to a `wfctl-infra-dns-audit.jsonl` file in the plugin's data dir (matches existing wfctl logging patterns — confirmed pre-flight; no shared audit infra exists yet).
+**Bootstrap flow** (closes cycle-5 I-3 UX confusion):
 
-**For pre-existing policy** (`--bootstrap` overwrite guard, closes cycle-2 m-1): without `--overwrite-existing`, abort with: `error: existing policy detected at _workflow-dns-policy.<zone> (heritage=wfinfra-v1 found in N RRs); re-run with --overwrite-existing to replace (audit-logged)`.
+The `set-policy` command has TWO modes:
+
+- **Default mode** (`wfctl infra-dns set-policy <zone> -f ownership/<zone>.yaml`): reads current policy via `GetTXT`, diffs against the YAML, prints diff, prompts y/N confirmation, then writes. SAFE for routine policy updates on zones that already have a policy.
+
+- **Bootstrap mode** (`wfctl infra-dns set-policy <zone> -f ownership/<zone>.yaml --bootstrap`): writes the policy unconditionally if no existing policy detected. If existing policy IS detected: aborts unless `--overwrite-existing` is also passed. Bootstrap-mode bypasses the diff/prompt flow (intended for first-write or scripted CI use).
+
+| Flags | Existing policy? | Behavior |
+|---|---|---|
+| (none) | yes | Diff + prompt + write |
+| (none) | no | Error: `--bootstrap required for first-write` |
+| `--bootstrap` | yes | Error: `--overwrite-existing required` |
+| `--bootstrap` | no | Write directly |
+| `--bootstrap --overwrite-existing` | yes | Write directly (audit-logged with prior-state snapshot) |
+| `--bootstrap --overwrite-existing` | no | Write directly (same as `--bootstrap` alone) |
+
+All paths: NO gate check (bootstrap is the gate's exception). Trust = provider API token holder.
+
+**Audit log path**: `${XDG_STATE_HOME:-$HOME/.local/state}/wfctl/plugins/workflow-plugin-infra/dns-policy-audit.jsonl`. Per-line JSON entries: `{"ts","actor","zone","action","owners_added","owners_removed","records_added","records_removed","prior_sha256","new_sha256"}`. Append-only. Closes cycle-5 m-2.
 
 There is no circular dependency: bootstrap binary does not invoke the gate. Subsequent app deploys go through `infra.dns_record` step → `dnsgate.Gate.CheckAllowed` → pass/fail.
 
@@ -464,6 +512,18 @@ For zones using managed DNSSEC (DO, Cloudflare, Route53 — all auto-resign on T
 | m-1 `--bootstrap` overwrite guard missing | Added `--overwrite-existing` requirement when heritage-sentinel RR detected. Aborts otherwise. |
 | m-2 `transfer-records` naming misleading | Renamed to `transfer-ownership` throughout. |
 | m-3 `d=true` Serialize() validation missing | `Serialize()` now also validates multiple-default; returns ErrMultipleDefaults at write time before TXT bytes hit DNS. |
+
+### Cycle 5 (2 NEW Critical + 3 Important + 2 Minor — introduced by cycle-4 fixes)
+
+| Finding | Resolution |
+|---|---|
+| **C-1 NEW** `binary` field invented in `CLICommandDeclaration` (doesn't exist); `BuildCLIRegistry` always uses `<dir>/<dir>` | Single-binary `--wfctl-cli` handler pattern: main plugin binary handles BOTH plugin-server role + admin CLI role based on os.Args[1]=="--wfctl-cli" sentinel. Zero new binaries; zero engine changes. |
+| **C-2 NEW** `dnsprovider.Apply` undefined; post-gate DNS write path missing | Added separate `DNSRecordWriter` interface (`UpsertRecord`/`DeleteRecord`); `Adapter` combines both; `dnsprovider.Apply` declared with explicit signature. |
+| I-1 NEW Route53/GCP/Azure also break single-token signature | Changed `NewAdapter(provider, token string)` → `NewAdapter(provider string, creds map[string]string)`. v1 scope narrowed to DO + Cloudflare only (single-token providers). Multi-cred providers deferred to v2. |
+| I-2 NEW Hover deferral contradicted by stale "wrap gRPC in v1" paragraph | Removed stale paragraph; provider matrix is authoritative single source of v1 scope. |
+| I-3 NEW Bootstrap UX confusion (`--bootstrap` vs routine `set-policy`) | Defined 6-case table: default mode (diff+prompt+write), bootstrap mode (unconditional first-write), bootstrap+overwrite-existing (replace). Each maps to a clear behavior. |
+| m-1 `--wfctl-cli` prefix not documented for binary | Documented in main() snippet showing the os.Args[1] check. |
+| m-2 Audit data dir undefined | Specified `${XDG_STATE_HOME:-$HOME/.local/state}/wfctl/plugins/workflow-plugin-infra/dns-policy-audit.jsonl`. |
 
 ### Cycle 4 (2 NEW Critical + 4 Important + 3 Minor — introduced by cycle-3 fixes)
 
