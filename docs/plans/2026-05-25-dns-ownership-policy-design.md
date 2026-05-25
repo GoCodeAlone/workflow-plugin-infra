@@ -173,7 +173,7 @@ func NewAdapter(provider, token string) (dnspolicy.DNSPolicyReader, error) { ...
 | Route53 (AWS) | `libdns/route53` | ✓ exists |
 | GCP Cloud DNS | `libdns/googleclouddns` | ✓ exists |
 | Azure DNS | `libdns/azure` | ✓ exists |
-| **Hover** | NO libdns adapter | ✗ — embed lightweight `hover.Client` HTTP calls directly in `internal/dnsprovider/hover.go`. The client (~80 lines) currently lives inside workflow-plugin-hover's internal package and supports TXT records via its `Type` field. Either (a) extract to `github.com/GoCodeAlone/workflow-plugin-hover/pkg/hoverclient` (preferred for reuse) and import here, or (b) copy the ~80 lines into this plugin (acceptable for v1 if extraction is too disruptive). v1 starts with option (b); option (a) is a follow-up cleanup. (Closes cycle-3 I-1/I-3 — gRPC wrap was architecturally wrong; Hover plugin is an IaCProvider server, not a TXT read/write API.) |
+| **Hover** | DEFERRED to v2 | The Hover client is 508 lines (not ~80 as cycle-3 design claimed); the adapter requires multi-step logic (`GetDomain → ListRecords → Create/Update`), uses cookie-based session auth (username + password + TOTP, NOT a single API token), and breaks the `NewAdapter(provider, token string)` signature. v1 ships with single-API-token providers only. v2 either (a) extracts `pkg/hoverclient` from workflow-plugin-hover + extends `NewAdapter` to accept a structured credentials object, or (b) adds an inline `dnsprovider.HoverAdapter` with its own multi-cred constructor. **gocodealone-dns currently has 0 zones on Hover; deferring Hover from v1 has zero blast radius.** (Closes cycle-4 I-1+I-2 per reviewer Option 1.) |
 | GoDaddy | `libdns/godaddy` | ✓ exists |
 
 Hover gap: `workflow-plugin-hover` already implements DNS read/write against Hover's account UI (no API). For v1, wrap its existing gRPC interface into the `DNSPolicyReader` interface within `internal/dnsprovider/hover.go`. No new Hover dependency needed.
@@ -240,10 +240,19 @@ func (p *infraPlugin) TypedStepTypes() []string {
     return []string{"infra.dns_record"}
 }
 func (p *infraPlugin) CreateTypedStep(typeName, name string, config *anypb.Any) (sdk.StepInstance, error) {
-    factory := sdk.NewTypedStepFactory(typeName,
+    handler := func(ctx context.Context, req sdk.TypedStepRequest[*contracts.DNSRecordStepConfig, *contracts.DNSRecordStepInput]) (*sdk.TypedStepResult[*contracts.DNSRecordStepOutput], error) {
+        adapter, err := dnsprovider.NewAdapter(req.Config.Provider, req.Config.ProviderTokenRef)
+        if err != nil { return nil, err }
+        if gerr := dnsgate.Gate(ctx, adapter, req.Config.Zone, req.Input.Name, req.Input.RecordType, req.Input.Owner); gerr != nil {
+            return &sdk.TypedStepResult[*contracts.DNSRecordStepOutput]{Output: &contracts.DNSRecordStepOutput{Status: "gate-denied", DenialReason: gerr.Error()}}, nil
+        }
+        return dnsprovider.Apply(ctx, adapter, req.Config, req.Input)
+    }
+    factory := sdk.NewTypedStepFactory[*contracts.DNSRecordStepConfig, *contracts.DNSRecordStepInput, *contracts.DNSRecordStepOutput](
+        typeName,
         &contracts.DNSRecordStepConfig{},
         &contracts.DNSRecordStepInput{},
-        // step body: invokes dnsgate.Gate then dnsprovider.Upsert/Delete
+        handler,
     )
     return factory.CreateTypedStep(typeName, name, config)
 }
@@ -261,13 +270,15 @@ Adding the step type requires a matching contract entry so `wfctl plugin validat
       "kind": "step",
       "type": "infra.dns_record",
       "mode": "strict",
-      "config_descriptor": "workflow.plugins.infra.v1.DNSRecordStepConfig",
-      "input_descriptor": "workflow.plugins.infra.v1.DNSRecordStepInput",
-      "output_descriptor": "workflow.plugins.infra.v1.DNSRecordStepOutput"
+      "config": "workflow.plugins.infra.v1.DNSRecordStepConfig",
+      "input":  "workflow.plugins.infra.v1.DNSRecordStepInput",
+      "output": "workflow.plugins.infra.v1.DNSRecordStepOutput"
     }
   ]
 }
 ```
+
+**Field names**: `config` / `input` / `output` (NOT `config_descriptor` etc.) per `plugin_audit.go:77-79`'s `firstStringField` lookup. Wrong names silently register as untyped — closes adversarial cycle-4 C-1.
 
 ### infra.dns deprecation cleanup (closes adversarial cycle-3 m-3)
 
@@ -292,6 +303,12 @@ The step's `Execute()` method is the gate fire site:
 
 The previously-existing `infra.dns` MODULE remains untouched. Its `Start()` stub will be filled in or removed in a separate effort outside this design's scope.
 
+### Secret resolution path (closes adversarial cycle-4 I-4)
+
+`DNSRecordStepConfig.provider_token_ref` is a YAML reference using the standard workflow engine env-var substitution pattern (`${DO_TOKEN}`, `${CF_TOKEN}`, etc.). Resolution happens at config-load time via the engine's existing `config.ExpandEnvInMapPreservingVars` pipeline — BEFORE proto-encoding the step config. By the time the step's typed `Config.ProviderTokenRef` field is populated, it holds the resolved literal token string (not a placeholder).
+
+This matches existing patterns in all 13 infra modules + cross-plugin IaC modules. No new SDK hook required. The `cmd/dns-policy-admin` binary uses the same env-var convention directly (reads `${DO_TOKEN}` etc. from its own environment at invocation time — GH Actions secrets pipe in via `env:` block).
+
 ### Owner identity + trust model (revised — closes adversarial cycle-1 I-3 + cycle-2 C-1)
 
 **Owner identity at call time**: typed `owner` field in `DNSRecordStepInput` (see above). STRICT_PROTO enforced. Cannot be silently absent.
@@ -311,9 +328,25 @@ This addresses adversarial C-2 (owner availability) by adding the config field, 
 
 ### Bootstrap path + admin CLI dispatch (revised — closes adversarial cycle-1 C-1 + cycle-3 C-2)
 
-**Command surface delivery via plugin-binary dispatch** (closes cycle-3 C-2): the design originally said `wfctl plugin infra dns set-policy` — this subcommand path doesn't exist + wfctl has no mechanism for external plugins to add nested subcommands under `wfctl plugin <name>`. Adding it would require core wfctl changes (violates non-goal).
+**Command surface delivery via plugin-binary dispatch + plugin.json capabilities** (closes cycle-3 C-2 + cycle-4 C-2): correct mechanism per `plugin_cli_commands.go:122` + `BuildCLIRegistry()`:
 
-**Resolution**: ship a standalone `cmd/wfctl-infra-dns` binary inside workflow-plugin-infra. wfctl's existing plugin-binary dispatch (`BuildCLIRegistry(defaultPluginCommandDir())` in wfctl main.go) picks up any binary named `wfctl-<name>` in the plugin directory and exposes it as `wfctl <name>`. After `wfctl plugin install workflow-plugin-infra`, the operator gains:
+1. Ship a standalone binary `cmd/dns-policy-admin` (any name; not auto-detected by prefix) inside workflow-plugin-infra.
+2. `wfctl plugin install workflow-plugin-infra` extracts the plugin tarball to `<plugin-dir>/workflow-plugin-infra/` and (per existing rename logic) installs the main plugin binary as `<plugin-dir>/workflow-plugin-infra/workflow-plugin-infra`. The admin binary is shipped alongside as a second artifact: `<plugin-dir>/workflow-plugin-infra/dns-policy-admin`.
+3. Update `plugin.json` with `capabilities.cliCommands`:
+```json
+{
+  "capabilities": {
+    "moduleTypes": [...],
+    "stepTypes": ["infra.dns_record"],
+    "cliCommands": [
+      { "name": "infra-dns", "description": "DNS ownership policy admin (set-policy, drift, transfer-ownership, policy show)", "binary": "dns-policy-admin" }
+    ]
+  }
+}
+```
+4. `BuildCLIRegistry(defaultPluginCommandDir())` reads `plugin.json.capabilities.cliCommands[]` and registers `wfctl infra-dns` → `<plugin-dir>/workflow-plugin-infra/dns-policy-admin`.
+
+After install, operator gains:
 
 ```
 wfctl infra-dns set-policy <zone> -f ownership/<zone>.yaml --as-owner sre
@@ -323,7 +356,9 @@ wfctl infra-dns drift <zone>
 wfctl infra-dns policy show <zone>
 ```
 
-Zero changes to wfctl core. The binary is built by the plugin's goreleaser config (added to existing builds:); `wfctl plugin install` already handles placement.
+Zero changes to wfctl core. The admin binary is built by the plugin's goreleaser config (added to existing `builds:` block); `wfctl plugin install` already handles placement of multi-binary plugin payloads.
+
+**Reserved-name check**: `wfctl infra-dns` does NOT collide with the existing `wfctl infra` subcommand because dispatch keys are exact-match (`commands["infra"]` vs `commands["infra-dns"]`). Verified clean.
 
 **Bootstrap flow** (gate-bypass details):
 1. Operator runs `wfctl infra-dns set-policy <zone> -f ownership/<zone>.yaml --as-owner sre`.
@@ -345,9 +380,9 @@ For the FIRST zone to be policy-managed: SRE runs `set-policy` with `--bootstrap
 
 When SRE removes an owner from policy (e.g. retiring multisite), the gate enters a defined fallback for that owner's prior records:
 
-1. **Drift detection** (`wfctl plugin infra dns drift <zone>`): records matching the removed owner's prior patterns are flagged as `orphaned-records` in the report — they exist in DNS but no current owner claims them.
+1. **Drift detection** (`wfctl infra-dns drift <zone>`): records matching the removed owner's prior patterns are flagged as `orphaned-records` in the report — they exist in DNS but no current owner claims them.
 2. **Apply behavior**: by default, `infra.dns_record` applies do NOT delete orphaned records (apply is upsert-only by default; explicit `delete: true` requires `--force-orphaned` flag).
-3. **Transfer-ownership command**: `wfctl plugin infra dns transfer-ownership <zone> --from multisite --to sre --records www,admin` — emits a new policy RR with the records added to the target owner's patterns. Audit-logged.
+3. **Transfer-ownership command**: `wfctl infra-dns transfer-ownership <zone> --from multisite --to sre --records www,admin` — emits a new policy RR with the records added to the target owner's patterns. Audit-logged.
 
 This gives SRE a clean exit path: revoke delegation, then either delete orphaned records explicitly OR transfer them to a new owner.
 
@@ -368,11 +403,11 @@ Mid-flight race: SRE updates policy while app is mid-apply. Result: partial appl
 1. Fetches `_workflow-dns-policy.<zone>` TXT per zone.
 2. Parses via `internal/dnspolicy.Parse`.
 3. Writes the parsed structure to `ownership/<zone>.yaml`.
-4. Drift between yaml and live TXT → import script flags it; SRE reconciles via `wfctl plugin infra dns set-policy <zone> -f ownership/<zone>.yaml`.
+4. Drift between yaml and live TXT → import script flags it; SRE reconciles via `wfctl infra-dns set-policy <zone> -f ownership/<zone>.yaml`.
 
 ### DNSSEC interaction (closes adversarial m-5)
 
-For zones using managed DNSSEC (DO, Cloudflare, Route53 — all auto-resign on TXT additions), the policy gate's TXT writes are transparent. For self-managed DNSSEC zones, the operator must re-sign after policy changes (`wfctl plugin infra dns set-policy` does NOT trigger re-signing; that's the zone's signing infrastructure responsibility). v1 scope: managed-DNSSEC zones only. Self-managed DNSSEC zone support deferred.
+For zones using managed DNSSEC (DO, Cloudflare, Route53 — all auto-resign on TXT additions), the policy gate's TXT writes are transparent. For self-managed DNSSEC zones, the operator must re-sign after policy changes (`wfctl infra-dns set-policy` does NOT trigger re-signing; that's the zone's signing infrastructure responsibility). v1 scope: managed-DNSSEC zones only. Self-managed DNSSEC zone support deferred.
 
 ## Assumptions
 
@@ -394,7 +429,7 @@ For zones using managed DNSSEC (DO, Cloudflare, Route53 — all auto-resign on T
 1. ~~Pattern syntax `*` vs `**`~~ — RESOLVED: `*` single label, `**` multi-segment, `@` apex. Locked at v1.
 2. ~~Wildcard policy gotcha (`*.example.com` interaction)~~ — RESOLVED: wildcard DNS records (`*.zone TXT ...`) are records like any other; if `*` is in a delegated pattern, the owner may manage them. Tests cover this case.
 3. ~~Caching~~ — RESOLVED: in-memory per `wfctl apply` invocation. ~100 DNS mutations = 1 GetTXT per zone (not 100; cache key is zone). Acknowledged as acceptable load.
-4. Tooling: `wfctl plugin infra dns policy show <zone>` reads + pretty-prints. Implementation plan tasks include.
+4. Tooling: `wfctl infra-dns policy show <zone>` reads + pretty-prints. Implementation plan tasks include.
 5. Test fixtures: mock `DNSPolicyReader` via Go fakes. Trivial.
 
 ## Adversarial cycle 1 + 2 findings — resolutions inline
@@ -430,12 +465,26 @@ For zones using managed DNSSEC (DO, Cloudflare, Route53 — all auto-resign on T
 | m-2 `transfer-records` naming misleading | Renamed to `transfer-ownership` throughout. |
 | m-3 `d=true` Serialize() validation missing | `Serialize()` now also validates multiple-default; returns ErrMultipleDefaults at write time before TXT bytes hit DNS. |
 
+### Cycle 4 (2 NEW Critical + 4 Important + 3 Minor — introduced by cycle-3 fixes)
+
+| Finding | Resolution |
+|---|---|
+| **C-1 NEW** plugin.contracts.json invented field names (`config_descriptor` etc.) silently register as untyped | Renamed to `config` / `input` / `output` per `plugin_audit.go:77-79` `firstStringField` lookup. |
+| **C-2 NEW** wfctl plugin-binary dispatch does NOT scan `wfctl-<name>` (reads `plugin.json.capabilities.cliCommands[]`) | Mechanism rewritten: ship `dns-policy-admin` binary alongside main plugin binary; declare in `plugin.json.capabilities.cliCommands`; `BuildCLIRegistry()` reads + registers `wfctl infra-dns` → admin binary. |
+| I-1 NEW Hover client 508 lines + multi-step adapter logic | Hover deferred to v2. gocodealone-dns has 0 Hover zones; zero blast radius. |
+| I-2 NEW Hover auth needs username+password+TOTP, breaks `NewAdapter(provider, token)` | Folded into I-1 (deferred). `NewAdapter` keeps single-token signature for v1; structured creds = v2 problem. |
+| I-3 NEW stale `wfctl plugin infra dns *` references | Global s/r → `wfctl infra-dns`. |
+| I-4 NEW secret resolution path undefined | Documented: `${ENV_VAR}` via `config.ExpandEnvInMapPreservingVars` at config-load. Matches existing infra modules. |
+| m-1 ADDITIVE to existing file ambiguous | Step proto messages explicitly noted as additions to existing `internal/contracts/infra.proto` (no new file). |
+| m-2 `sdk.NewTypedStepFactory` signature shown incomplete | Full 4-arg signature shown with handler closure body invoking `dnsgate.Gate` + `dnsprovider.Apply`. |
+| m-3 `libdns/route53` import path unverified from local files | Acknowledged as verification-pending; will be verified during implementation against the actual import path. |
+
 ### Cycle 3 (2 NEW Critical + 4 Important + 3 Minor — introduced by cycle-2 fixes)
 
 | Finding | Resolution |
 |---|---|
 | **C-1 NEW** DNSRecordStepInput conflates Config+Input; `sdk.TypedStepFactory[C,I,O]` requires 3 messages | Split into `DNSRecordStepConfig` (static) + `DNSRecordStepInput` (dynamic) + `DNSRecordStepOutput`. Matches `workflow-plugin-platform` precedent. |
-| **C-2 NEW** `wfctl plugin infra dns *` subcommands don't exist + no mechanism to add without core change | Ship `cmd/wfctl-infra-dns` binary; wfctl plugin-binary dispatch picks it up as `wfctl infra-dns <subcommand>`. Zero core changes. |
+| **C-2 NEW** `wfctl infra-dns *` subcommands don't exist + no mechanism to add without core change | Ship `cmd/wfctl-infra-dns` binary; wfctl plugin-binary dispatch picks it up as `wfctl infra-dns <subcommand>`. Zero core changes. |
 | I-1 NEW Hover wrap-gRPC architecturally unsound (hover plugin is IaC server, not TXT R/W API) | Embed lightweight `hover.Client` HTTP calls directly in `internal/dnsprovider/hover.go`. v1 copies ~80 lines; v2 extracts to `pkg/hoverclient` for reuse. |
 | I-2 NEW plugin.contracts.json must declare new step type | Added explicit entry in design: `{"kind":"step","type":"infra.dns_record","mode":"strict",...}`. |
 | I-3 NEW Hover IaC interface ≠ DNS TXT API | Folded into I-1 fix above. |
