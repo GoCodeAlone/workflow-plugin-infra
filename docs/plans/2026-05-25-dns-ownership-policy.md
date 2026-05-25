@@ -35,7 +35,7 @@
 |------|-------|-------|--------|
 | 1 | feat(infra): DNS ownership policy gate + infra.dns_record step + wfctl infra-dns CLI | Task 1, Task 2, Task 3, Task 4, Task 5, Task 6, Task 7, Task 8, Task 9, Task 10 | feat/dns-ownership-policy |
 
-**Status:** Draft
+**Status:** Locked 2026-05-25T20:24:21Z
 
 ---
 
