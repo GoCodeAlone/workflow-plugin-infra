@@ -1,12 +1,12 @@
 {
     "name": "workflow-plugin-infra",
-    "version": "0.1.1",
+    "version": "0.0.0",
     "description": "Abstract infra.* module types (13 types) with IaCProvider delegation",
     "author": "GoCodeAlone",
     "license": "MIT",
     "type": "external",
     "tier": "community",
-    "minEngineVersion": "0.51.7",
+    "minEngineVersion": "0.64.0",
     "keywords": ["infra", "iac", "infrastructure", "kubernetes", "database", "vpc", "dns"],
     "homepage": "https://github.com/GoCodeAlone/workflow-plugin-infra",
     "repository": "https://github.com/GoCodeAlone/workflow-plugin-infra",
@@ -59,7 +59,8 @@
             "infra.storage",
             "infra.certificate"
         ],
-        "stepTypes": [],
+        "stepTypes": ["infra.dns_record"],
+        "cliCommands": [{ "name": "infra-dns", "description": "DNS ownership policy admin (set-policy, drift, transfer-ownership, policy show)" }],
         "triggerTypes": []
     }
 }

@@ -153,3 +153,26 @@ message CertificateConfig {
   map<string, string> labels = 6;
   google.protobuf.Struct settings = 7;
 }
+
+// Static per-step config (resolved once at module construction).
+message DNSRecordStepConfig {
+  string provider               = 1;
+  map<string, string> provider_creds = 2;
+  string zone                   = 3;
+}
+
+message DNSRecordStepInput {
+  string name        = 1;
+  string record_type = 2;
+  string data        = 3;
+  int32  ttl         = 4;
+  int32  priority    = 5;
+  string owner       = 6;
+  string operation   = 7;
+}
+
+message DNSRecordStepOutput {
+  string status        = 1;
+  string record_id     = 2;
+  string denial_reason = 3;
+}

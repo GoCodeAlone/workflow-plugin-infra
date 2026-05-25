@@ -8,6 +8,9 @@ import (
 	"fmt"
 
 	"github.com/GoCodeAlone/workflow-plugin-infra/internal/contracts"
+	"github.com/GoCodeAlone/workflow-plugin-infra/internal/dnsaudit"
+	"github.com/GoCodeAlone/workflow-plugin-infra/internal/dnsgate"
+	"github.com/GoCodeAlone/workflow-plugin-infra/internal/dnsprovider"
 	pb "github.com/GoCodeAlone/workflow/plugin/external/proto"
 	sdk "github.com/GoCodeAlone/workflow/plugin/external/sdk"
 	"google.golang.org/protobuf/encoding/protojson"
@@ -122,12 +125,59 @@ func typedModuleFactory[C proto.Message](typeName string, configPrototype C) *sd
 
 // StepTypes returns the step type names this plugin provides.
 func (p *infraPlugin) StepTypes() []string {
-	return []string{}
+	return []string{"infra.dns_record"}
 }
 
 // CreateStep creates a step instance of the given type.
+// infra.dns_record requires typed config; direct untyped path is unsupported.
 func (p *infraPlugin) CreateStep(typeName, name string, _ map[string]any) (sdk.StepInstance, error) {
-	return nil, fmt.Errorf("infra plugin: unknown step type %q", typeName)
+	return nil, fmt.Errorf("infra.dns_record requires typed config; legacy untyped path not supported")
+}
+
+// TypedStepTypes returns the typed step type names this plugin provides.
+func (p *infraPlugin) TypedStepTypes() []string {
+	return []string{"infra.dns_record"}
+}
+
+// CreateTypedStep creates a typed step instance for infra.dns_record.
+func (p *infraPlugin) CreateTypedStep(typeName, name string, config *anypb.Any) (sdk.StepInstance, error) {
+	// cachingGate is shared across all executions of this step instance,
+	// amortizing GetTXT calls when a pipeline processes many records in one
+	// apply (one fetch per zone, not one per record).
+	cachingGate := dnsgate.NewCachingGate()
+	handler := func(ctx context.Context, req sdk.TypedStepRequest[*contracts.DNSRecordStepConfig, *contracts.DNSRecordStepInput]) (*sdk.TypedStepResult[*contracts.DNSRecordStepOutput], error) {
+		creds := dnsprovider.ExpandCredsMap(req.Config.ProviderCreds)
+		adapter, err := dnsprovider.NewAdapter(req.Config.Provider, creds)
+		if err != nil {
+			return nil, err
+		}
+		if gerr := cachingGate.Check(ctx, adapter, req.Config.Zone, req.Input.Name, req.Input.RecordType, req.Input.Owner); gerr != nil {
+			dnsaudit.LogOutcome("step-execute", req.Config.Zone, req.Input.Name, req.Input.RecordType, "gate-denied", gerr.Error())
+			return &sdk.TypedStepResult[*contracts.DNSRecordStepOutput]{
+				Output: &contracts.DNSRecordStepOutput{Status: "gate-denied", DenialReason: gerr.Error()},
+			}, nil
+		}
+		op := req.Input.Operation
+		if op == "" {
+			op = "upsert"
+		}
+		dnsaudit.LogAttempt("step-execute", req.Config.Zone, req.Input.Name, req.Input.RecordType, op, req.Input.Owner, req.Config.Provider)
+		result, applyErr := dnsprovider.Apply(ctx, adapter, req.Config, req.Input)
+		outcome := result.Output.Status
+		errMsg := ""
+		if outcome != "ok" {
+			errMsg = result.Output.DenialReason
+		}
+		dnsaudit.LogOutcome("step-execute", req.Config.Zone, req.Input.Name, req.Input.RecordType, outcome, errMsg)
+		return result, applyErr
+	}
+	factory := sdk.NewTypedStepFactory[*contracts.DNSRecordStepConfig, *contracts.DNSRecordStepInput, *contracts.DNSRecordStepOutput](
+		typeName,
+		&contracts.DNSRecordStepConfig{},
+		&contracts.DNSRecordStepInput{},
+		handler,
+	)
+	return factory.CreateTypedStep(typeName, name, config)
 }
 
 // ContractRegistry returns strict protobuf descriptors for plugin module boundaries.
@@ -136,10 +186,17 @@ func (p *infraPlugin) ContractRegistry() *pb.ContractRegistry {
 }
 
 func buildContractRegistry(definitions []infraModuleDefinition) *pb.ContractRegistry {
-	descriptors := make([]*pb.ContractDescriptor, 0, len(definitions))
+	descriptors := make([]*pb.ContractDescriptor, 0, len(definitions)+1)
 	for _, definition := range definitions {
 		descriptors = append(descriptors, moduleContract(definition.typeName, definition.configMessage))
 	}
+	// Step contracts
+	descriptors = append(descriptors, stepContract(
+		"infra.dns_record",
+		"DNSRecordStepConfig",
+		"DNSRecordStepInput",
+		"DNSRecordStepOutput",
+	))
 	return &pb.ContractRegistry{
 		FileDescriptorSet: &descriptorpb.FileDescriptorSet{
 			File: []*descriptorpb.FileDescriptorProto{
@@ -165,6 +222,18 @@ func moduleContract(moduleType, configMessage string) *pb.ContractDescriptor {
 		Kind:          pb.ContractKind_CONTRACT_KIND_MODULE,
 		ModuleType:    moduleType,
 		ConfigMessage: pkg + configMessage,
+		Mode:          pb.ContractMode_CONTRACT_MODE_STRICT_PROTO,
+	}
+}
+
+func stepContract(stepType, configMessage, inputMessage, outputMessage string) *pb.ContractDescriptor {
+	const pkg = "workflow.plugins.infra.v1."
+	return &pb.ContractDescriptor{
+		Kind:          pb.ContractKind_CONTRACT_KIND_STEP,
+		StepType:      stepType,
+		ConfigMessage: pkg + configMessage,
+		InputMessage:  pkg + inputMessage,
+		OutputMessage: pkg + outputMessage,
 		Mode:          pb.ContractMode_CONTRACT_MODE_STRICT_PROTO,
 	}
 }
@@ -203,6 +272,9 @@ func (m *infraModule) Init() error {
 }
 
 func (m *infraModule) Start(_ context.Context) error {
+	if m.infraType == "infra.dns" {
+		return fmt.Errorf("infra.dns module is deprecated; use the infra.dns_record step type instead. See docs/migration/infra-dns-to-step.md")
+	}
 	// TODO: Resolve IaCProvider from registry and provision resource
 	return nil
 }
