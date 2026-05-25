@@ -338,6 +338,7 @@ func TestMatchPattern(t *testing.T) {
         {"@", "www", false},
         {"*", "www", true},
         {"*", "anything", true},
+        {"*", "", false},               // empty name → false (closes plan-cycle-1 m-1)
         {"*", "www.sub", false},        // * = single label only
         {"_acme-challenge.*", "_acme-challenge.www", true},
         {"_acme-challenge.*", "_acme-challenge.www.sub", false}, // * is single
@@ -499,18 +500,34 @@ var protectedTypes = map[string]bool{"SOA": true, "NS": true}
 
 // CheckAllowed returns nil if owner may upsert (name, recordType) under this policy.
 // Returns an error describing the denial otherwise.
+//
+// Priority semantics (closes plan-cycle-1 C-3):
+//   1. Explicit pattern claims take precedence over default-owner fallback.
+//   2. If any owner (including non-caller) has an explicit pattern matching
+//      (name, recordType), only that owner may mutate.
+//   3. Default owner catches only unmatched records.
+//   4. SOA/NS protected unless explicitly listed in the owner's Types.
 func (p *Policy) CheckAllowed(name, recordType, owner string) error {
-    // Find the owner's claim (matching by pattern + type)
+    // Phase 1: find any explicit pattern claim (any owner) — explicit beats default
+    var explicitClaimer string
     for _, e := range p.Entries {
-        if e.Owner == owner && matchesEntry(e, name, recordType) {
-            // SOA/NS protected from non-SRE owners (defense in depth)
-            if protectedTypes[recordType] && !isProtectedAllowed(e, recordType) {
-                return fmt.Errorf("dnspolicy: record type %s never delegated (zone-level only)", recordType)
+        if e.Default && len(e.Patterns) == 0 {
+            continue // skip pure default-only entries in phase 1
+        }
+        if matchesEntry(e, name, recordType) {
+            explicitClaimer = e.Owner
+            if e.Owner == owner {
+                if protectedTypes[recordType] && !isProtectedAllowed(e, recordType) {
+                    return fmt.Errorf("dnspolicy: record type %s never delegated (zone-level only)", recordType)
+                }
+                return nil // explicit claim by caller → allow
             }
-            return nil
         }
     }
-    // Caller's owner didn't claim; check if default owner exists and caller IS default
+    if explicitClaimer != "" {
+        return fmt.Errorf("dnspolicy: denied — name=%q type=%s owner=%q; explicitly claimed by owner=%q", name, recordType, owner, explicitClaimer)
+    }
+    // Phase 2: no explicit claim exists → fall back to default owner if caller is default
     for _, e := range p.Entries {
         if e.Default && e.Owner == owner {
             if protectedTypes[recordType] && !isProtectedAllowed(e, recordType) {
@@ -519,18 +536,14 @@ func (p *Policy) CheckAllowed(name, recordType, owner string) error {
             return nil
         }
     }
-    // Find what (other) owner DOES claim it, for clearer error
-    for _, e := range p.Entries {
-        if matchesEntry(e, name, recordType) && e.Owner != owner {
-            return fmt.Errorf("dnspolicy: denied — name=%q type=%s owner=%q; claimed by owner=%q", name, recordType, owner, e.Owner)
-        }
-    }
-    // Fail-closed: no match, no default
-    return fmt.Errorf("dnspolicy: denied — name=%q type=%s owner=%q matches no delegate and no default owner exists", name, recordType, owner)
+    // Phase 3: no match anywhere → fail-closed
+    return fmt.Errorf("dnspolicy: denied — name=%q type=%s owner=%q matches no delegate and no default owner exists for this caller", name, recordType, owner)
 }
 
+// matchesEntry returns true if entry's patterns + types cover (name, recordType).
+// Does NOT consider e.Default — that's caller's job (see CheckAllowed phase 1 skip).
 func matchesEntry(e Entry, name, recordType string) bool {
-    // Type scoping: if e.Types is non-empty, recordType must be in it (or be SOA/NS which is separately protected)
+    // Type scoping
     if len(e.Types) > 0 {
         ok := false
         for _, t := range e.Types {
@@ -538,10 +551,7 @@ func matchesEntry(e Entry, name, recordType string) bool {
         }
         if !ok { return false }
     }
-    // Pattern: any pattern match accepts. Default-owner with no patterns matches everything not claimed.
-    if len(e.Patterns) == 0 {
-        return e.Default
-    }
+    // Pattern match (default-only entries with no patterns are handled by caller)
     for _, pat := range e.Patterns {
         if MatchPattern(pat, name) { return true }
     }
@@ -549,13 +559,14 @@ func matchesEntry(e Entry, name, recordType string) bool {
 }
 
 func isProtectedAllowed(e Entry, recordType string) bool {
-    // SOA/NS allowed only if explicitly listed in e.Types
     for _, t := range e.Types {
         if t == recordType { return true }
     }
     return false
 }
 ```
+
+**Closes C-3**: phase-1 loop now skips default-only entries; explicit claims (even by non-caller) deny default-owner override. Phase 2 only fires when zero explicit claim exists.
 
 **Step 4: Run tests — PASS**
 
@@ -808,11 +819,10 @@ message DNSRecordStepOutput {
 }
 ```
 
-Regenerate Go bindings:
+Regenerate Go bindings (closes plan-cycle-1 I-1 — Makefile has no proto target; protoc is canonical):
+
 ```bash
-# Confirm the repo's existing proto-gen mechanism; either:
-make proto    # if Makefile target exists
-# OR
+# protoc v34.1 verified in PATH
 protoc --go_out=. --go_opt=paths=source_relative internal/contracts/infra.proto
 ```
 
@@ -892,7 +902,7 @@ func TestExpandCredsMap(t *testing.T) {
     os.Setenv("DNS_TEST_TOKEN", "expanded-value")
     defer os.Unsetenv("DNS_TEST_TOKEN")
     in := map[string]string{"token": "$DNS_TEST_TOKEN", "literal": "raw"}
-    out := expandCredsMap(in)
+    out := ExpandCredsMap(in)
     if out["token"] != "expanded-value" { t.Errorf("got %q", out["token"]) }
     if out["literal"] != "raw" { t.Errorf("got %q", out["literal"]) }
 }
@@ -931,16 +941,17 @@ func NewAdapter(provider string, creds map[string]string) (dnspolicy.Adapter, er
 }
 ```
 
-`internal/dnsprovider/expand.go`:
+`internal/dnsprovider/expand.go` (EXPORTED — used by plugin.go in Task 8; closes plan-cycle-1 I-2):
 ```go
 package dnsprovider
 
 import "os"
 
-// expandCredsMap applies os.ExpandEnv to each value.
+// ExpandCredsMap applies os.ExpandEnv to each value.
 // Template-form ('{{ env "X" }}') is pre-resolved by the engine;
 // this catches bare-shell form ('$X' or '${X}').
-func expandCredsMap(in map[string]string) map[string]string {
+// EXPORTED: called from internal/plugin.go step handler.
+func ExpandCredsMap(in map[string]string) map[string]string {
     out := make(map[string]string, len(in))
     for k, v := range in {
         out[k] = os.ExpandEnv(v)
@@ -967,7 +978,7 @@ import (
 type doAdapter struct{ provider *digitalocean.Provider }
 
 func newDigitalOceanAdapter(creds map[string]string) (dnspolicy.Adapter, error) {
-    token := expandCredsMap(creds)["token"]
+    token := ExpandCredsMap(creds)["token"]
     if token == "" {
         return nil, fmt.Errorf("digitalocean: missing creds.token")
     }
@@ -991,36 +1002,83 @@ func (a *doAdapter) GetTXT(ctx context.Context, name string) ([]string, error) {
     return out, nil
 }
 
+// upsertOrAppend: DO-specific pattern (closes plan-cycle-1 C-4 + C-5).
+// libdns/digitalocean SetRecords requires existing ID via idFromRecord; passing
+// a new Record without ID errors with strconv.Atoi failure. Use GET-then-
+// AppendRecords (new) OR SetRecords-with-ID (existing) per-record.
+func (a *doAdapter) upsertRecords(ctx context.Context, zone string, desired []libdns.Record) ([]libdns.Record, error) {
+    existing, err := a.provider.GetRecords(ctx, zone)
+    if err != nil {
+        return nil, fmt.Errorf("digitalocean: list records: %w (creds redacted)", err)
+    }
+    // Match existing records by (Type, Name) and reuse their ID for SetRecords;
+    // anything unmatched goes through AppendRecords (creates new).
+    var updates, appends []libdns.Record
+    for _, d := range desired {
+        matched := false
+        for _, e := range existing {
+            if e.Type == d.Type && e.Name == d.Name && e.Value == d.Value {
+                matched = true // exact match — no-op (idempotent)
+                break
+            }
+            if e.Type == d.Type && e.Name == d.Name {
+                d.ID = e.ID
+                updates = append(updates, d)
+                matched = true
+                break
+            }
+        }
+        if !matched { appends = append(appends, d) }
+    }
+    var out []libdns.Record
+    if len(updates) > 0 {
+        u, err := a.provider.SetRecords(ctx, zone, updates)
+        if err != nil { return nil, fmt.Errorf("digitalocean: update records: %w (creds redacted)", err) }
+        out = append(out, u...)
+    }
+    if len(appends) > 0 {
+        a2, err := a.provider.AppendRecords(ctx, zone, appends)
+        if err != nil { return nil, fmt.Errorf("digitalocean: append records: %w (creds redacted)", err) }
+        out = append(out, a2...)
+    }
+    return out, nil
+}
+
 func (a *doAdapter) UpsertTXT(ctx context.Context, name string, values []string, ttl int) error {
     zone := zoneFromFQDN(name)
     relName := strings.TrimSuffix(name, "."+zone)
-    // libdns SetRecords replaces all records at (name, type)
     recs := make([]libdns.Record, len(values))
     for i, v := range values {
         recs[i] = libdns.Record{Type: "TXT", Name: relName, Value: v, TTL: time.Duration(ttl) * time.Second}
     }
-    _, err := a.provider.SetRecords(ctx, zone, recs)
-    if err != nil {
-        return fmt.Errorf("digitalocean: upsert TXT %s: %w (creds redacted)", name, err)
-    }
-    return nil
+    _, err := a.upsertRecords(ctx, zone, recs)
+    return err
 }
 
 func (a *doAdapter) UpsertRecord(ctx context.Context, zone, name, recordType, data string, ttl, priority int32) (string, error) {
     rec := libdns.Record{Type: recordType, Name: name, Value: data, TTL: time.Duration(ttl) * time.Second, Priority: uint(priority)}
-    out, err := a.provider.SetRecords(ctx, zone, []libdns.Record{rec})
-    if err != nil {
-        return "", fmt.Errorf("digitalocean: upsert %s record: %w (creds redacted)", recordType, err)
-    }
+    out, err := a.upsertRecords(ctx, zone, []libdns.Record{rec})
+    if err != nil { return "", err }
     if len(out) > 0 { return out[0].ID, nil }
     return "", nil
 }
 
+// DeleteRecord: GET first to find ID, then DeleteRecords with ID.
+// libdns/digitalocean DeleteRecords requires ID (closes plan-cycle-1 C-5).
 func (a *doAdapter) DeleteRecord(ctx context.Context, zone, name, recordType string) error {
-    _, err := a.provider.DeleteRecords(ctx, zone, []libdns.Record{{Type: recordType, Name: name}})
-    if err != nil {
-        return fmt.Errorf("digitalocean: delete %s record: %w (creds redacted)", recordType, err)
+    existing, err := a.provider.GetRecords(ctx, zone)
+    if err != nil { return fmt.Errorf("digitalocean: list records: %w (creds redacted)", err) }
+    var toDelete []libdns.Record
+    for _, e := range existing {
+        if e.Type == recordType && e.Name == name {
+            toDelete = append(toDelete, e) // preserves ID
+        }
     }
+    if len(toDelete) == 0 {
+        return nil // idempotent: nothing to delete
+    }
+    _, err = a.provider.DeleteRecords(ctx, zone, toDelete)
+    if err != nil { return fmt.Errorf("digitalocean: delete records: %w (creds redacted)", err) }
     return nil
 }
 
@@ -1103,13 +1161,13 @@ Expected: tests PASS, full plugin build PASS.
 
 ```bash
 git add internal/dnsprovider/ go.mod go.sum
-git commit -m "feat(dnsprovider): DO + Cloudflare libdns adapters + NewAdapter + Apply + expandCredsMap
+git commit -m "feat(dnsprovider): DO + Cloudflare libdns adapters + NewAdapter + Apply + ExpandCredsMap
 
 internal/dnsprovider package isolates the libdns boundary. Adapter
 combines DNSPolicyReader + DNSRecordWriter. NewAdapter dispatches
 on provider name (case-folded) + ErrUnknownProvider sentinel.
 v1 supports digitalocean + cloudflare (single-token providers).
-expandCredsMap applies os.ExpandEnv for bare-shell creds. Apply
+ExpandCredsMap applies os.ExpandEnv for bare-shell creds. Apply
 performs post-gate upsert/delete with redacted provider errors."
 git push
 ```
@@ -1185,15 +1243,25 @@ func (p *infraPlugin) TypedStepTypes() []string {
 
 func (p *infraPlugin) CreateTypedStep(typeName, name string, config *anypb.Any) (sdk.StepInstance, error) {
     handler := func(ctx context.Context, req sdk.TypedStepRequest[*contracts.DNSRecordStepConfig, *contracts.DNSRecordStepInput]) (*sdk.TypedStepResult[*contracts.DNSRecordStepOutput], error) {
-        creds := dnsprovider.ExpandCredsMap(req.Config.ProviderCreds) // make expandCredsMap exported
+        creds := dnsprovider.ExpandCredsMap(req.Config.ProviderCreds)
         adapter, err := dnsprovider.NewAdapter(req.Config.Provider, creds)
         if err != nil { return nil, err }
         if gerr := dnsgate.Gate(ctx, adapter, req.Config.Zone, req.Input.Name, req.Input.RecordType, req.Input.Owner); gerr != nil {
+            dnsaudit.LogOutcome("step-execute", req.Config.Zone, req.Input.Name, req.Input.RecordType, "gate-denied", gerr.Error())
             return &sdk.TypedStepResult[*contracts.DNSRecordStepOutput]{
                 Output: &contracts.DNSRecordStepOutput{Status: "gate-denied", DenialReason: gerr.Error()},
             }, nil
         }
-        return dnsprovider.Apply(ctx, adapter, req.Config, req.Input)
+        op := req.Input.Operation
+        if op == "" { op = "upsert" }
+        dnsaudit.LogAttempt("step-execute", req.Config.Zone, req.Input.Name, req.Input.RecordType, op, req.Input.Owner, req.Config.Provider)
+        result, applyErr := dnsprovider.Apply(ctx, adapter, req.Config, req.Input)
+        // Apply never returns errors directly — it encodes outcome in result.Output.Status
+        outcome := result.Output.Status
+        errMsg := ""
+        if outcome != "ok" { errMsg = result.Output.DenialReason }
+        dnsaudit.LogOutcome("step-execute", req.Config.Zone, req.Input.Name, req.Input.RecordType, outcome, errMsg)
+        return result, applyErr
     }
     factory := sdk.NewTypedStepFactory[*contracts.DNSRecordStepConfig, *contracts.DNSRecordStepInput, *contracts.DNSRecordStepOutput](
         typeName,
@@ -1204,9 +1272,10 @@ func (p *infraPlugin) CreateTypedStep(typeName, name string, config *anypb.Any) 
     return factory.CreateTypedStep(typeName, name, config)
 }
 
-// Modify the existing infra.dns Start (find by typeName at line 205):
+// Modify the existing infra.dns Start (find by infraType at line 205):
+// NOTE: struct field is m.infraType (NOT m.typeName) — verified in plugin.go:193
 func (m *infraModule) Start(_ context.Context) error {
-    if m.typeName == "infra.dns" {
+    if m.infraType == "infra.dns" {
         return fmt.Errorf("infra.dns module is deprecated; use the infra.dns_record step type instead. See docs/migration/infra-dns-to-step.md")
     }
     return nil
@@ -1281,7 +1350,7 @@ git add internal/plugin.go internal/plugin_test.go docs/migration/infra-dns-to-s
 git commit -m "feat(plugin): register infra.dns_record step + handler + deprecate infra.dns module
 
 - StepTypes/CreateStep + TypedStepTypes/CreateTypedStep wire the new step type
-- Handler closure: expandCredsMap → NewAdapter → Gate → Apply
+- Handler closure: ExpandCredsMap → NewAdapter → Gate → Apply
 - infra.dns module Start() returns migration-hint error
 - docs/migration/infra-dns-to-step.md guides operators
 
@@ -1294,18 +1363,21 @@ git push
 
 ---
 
-### Task 9: `internal/admincli/` — `wfctl infra-dns` subcommands
+### Task 9: `internal/admincli/` — `wfctl infra-dns` subcommands + `internal/dnsaudit/` shared audit pkg
 
-**Change class:** CLI command (new subcommand surface).
+**Change class:** CLI command (new subcommand surface) + shared audit package extraction.
 
 **Files:**
+- Create: `internal/dnsaudit/audit.go` (shared LogAttempt/LogOutcome/LogPolicyEdit; closes plan-cycle-1 I-3)
+- Create: `internal/dnsaudit/audit_test.go`
 - Create: `internal/admincli/cli.go` (CLIProvider + dispatch)
 - Create: `internal/admincli/set_policy.go`
 - Create: `internal/admincli/drift.go`
 - Create: `internal/admincli/transfer_ownership.go`
 - Create: `internal/admincli/policy_show.go`
-- Create: `internal/admincli/audit.go`
 - Create: `internal/admincli/cli_test.go`
+
+**Architecture note**: audit functions live in `internal/dnsaudit/` (NOT `internal/admincli/`) so the step handler in `internal/plugin.go` can import them without creating a wrong-direction dependency (plugin layer → CLI layer would be backward). Both admincli AND plugin.go import dnsaudit.
 
 **Step 1: Write failing tests** (test CLI dispatch + audit log shape; admin commands themselves get smoke tests in Task 10)
 
@@ -1389,9 +1461,9 @@ func (c *CLIProvider) RunCLI(args []string) int {
 }
 ```
 
-`internal/admincli/audit.go`:
+`internal/dnsaudit/audit.go`:
 ```go
-package admincli
+package dnsaudit
 
 import (
     "encoding/json"
@@ -1548,34 +1620,29 @@ import (
     sdk "github.com/GoCodeAlone/workflow/plugin/external/sdk"
 )
 
-var Version = "0.0.0"
-
 func main() {
     sdk.ServePluginFull(
         internal.NewInfraPlugin(),
         &admincli.CLIProvider{},
         nil, // no hook handler
-        sdk.WithBuildVersion(sdk.ResolveBuildVersion(Version)),
+        sdk.WithBuildVersion(sdk.ResolveBuildVersion(internal.Version)),
     )
 }
 ```
 
-Update `plugin.json`:
-```diff
--    "version": "0.1.1",
-+    "version": "0.0.0",
-     "minEngineVersion": "0.51.7",
-+    "capabilities": {
-+        "moduleTypes": ["infra.dns", "infra.app", "infra.container", ... existing 13],
-+        "stepTypes": ["infra.dns_record"],
-+        "triggerTypes": [],
-+        "cliCommands": [
-+            { "name": "infra-dns", "description": "DNS ownership policy admin (set-policy, drift, transfer-ownership, policy show)" }
-+        ]
-+    }
-```
+**CRITICAL** (closes plan-cycle-1 C-2): `.goreleaser.yml:15` already injects ldflag `-X github.com/GoCodeAlone/workflow-plugin-infra/internal.Version={{ .Version }}`. Use `internal.Version` (existing pattern), NOT a new `main.Version` variable. The plugin already has `internal/version.go` defining `var Version = "0.0.0"`; new main.go imports it via `internal.Version`. No goreleaser change needed.
 
-(Note: version `0.0.0` per #758 ldflag sentinel; tagged v0.2.0 injects via goreleaser ldflag.)
+Update `plugin.json` (surgical edits — closes plan-cycle-1 I-4):
+
+1. Change `"version": "0.1.1"` → `"version": "0.0.0"` (sentinel per #758).
+2. Bump `"minEngineVersion": "0.51.7"` → `"0.64.0"` (uses ServePluginFull + TypedStepFactory[C,I,O]).
+3. Inside the EXISTING `capabilities` block (do not replace; modify):
+   - `moduleTypes` already lists the 13 existing module types (verbatim: `infra.container_service`, `infra.k8s_cluster`, `infra.database`, `infra.cache`, `infra.vpc`, `infra.load_balancer`, `infra.dns`, `infra.registry`, `infra.api_gateway`, `infra.firewall`, `infra.iam_role`, `infra.storage`, `infra.certificate`) — LEAVE UNCHANGED.
+   - Change `"stepTypes": []` → `"stepTypes": ["infra.dns_record"]`.
+   - Add new key `"cliCommands": [{ "name": "infra-dns", "description": "DNS ownership policy admin (set-policy, drift, transfer-ownership, policy show)" }]`.
+   - Leave `"triggerTypes"` and any other existing keys intact.
+
+(Note: version `0.0.0` per #758 ldflag sentinel; tagged v0.2.0 injects via goreleaser ldflag at `internal.Version`.)
 
 **Step 4: Run smoke + version-skew + verify-capabilities**
 
@@ -1662,6 +1729,25 @@ wfctl plugin validate-contract --for-publish --tag v0.2.0 .
 - GOWORK=off ALWAYS.
 - Edit existing SINGLE `import (...)` blocks; never add a second `import (...)`.
 - After Task 6 (proto regen): if existing tests fail due to enum/field renumbering, that's a sign the proto edit was non-additive. Re-check the proto edit; tag numbers must NOT conflict with existing fields.
-- After Task 7: libdns API method names (`SetRecords`, `GetRecords`, `DeleteRecords`) are believed correct per design but VERIFY against the actual libdns/digitalocean@latest godoc during implementation. The plan's code snippets are sketches.
-- After Task 8: `dnsprovider.expandCredsMap` is lowercase in Task 7 but needs to be exported (`ExpandCredsMap`) when plugin.go calls it. Either export it during Task 7 or rename during Task 8.
+- After Task 7: libdns API quirks per provider — DigitalOcean's `SetRecords` requires existing record ID; new records must use `AppendRecords`. Plan's `upsertRecords` helper handles this. Cloudflare's `SetRecords` is smarter (handles missing-ID case internally) — adapter can use SetRecords directly.
+- Task 8 imports include `dnsaudit` (NEW package introduced in Task 9; if Task 8 commits before Task 9, mock the dnsaudit functions or order Task 9's dnsaudit-package extraction before Task 8's commit).
 - After Task 9: real CLI subcommand body (set-policy/drift/transfer-ownership/policy show) is implementer's craft — tests anchor the dispatch + audit shape; subcommand bodies follow standard flag-parsing + dnsprovider/dnspolicy calls.
+- **SOA/NS records**: gate refuses to mutate SOA/NS for ANY owner (including default-owner SRE) unless explicitly listed in that owner's `Types` field. This is intentional — DNS zone-level records should be managed via the DNS provider's console, not through automation. CLI help text + migration doc call this out (m-3).
+
+## Adversarial cycle 1 — findings resolved inline
+
+| Finding | Resolution |
+|---|---|
+| C-1 `m.typeName` undefined | Fixed to `m.infraType` (correct struct field per plugin.go:193). |
+| C-2 main.Version vs goreleaser internal.Version mismatch | main.go uses `internal.Version` (existing ldflag target). No new variable. No goreleaser change. |
+| C-3 CheckAllowed default-owner steals explicit claims | Refactored two-phase logic: phase 1 skips default-only entries; explicit claim by any owner blocks default fallback. |
+| C-4 DO SetRecords needs ID — UpsertTXT broken | Added `upsertRecords` helper: GET → match on (Type,Name) → SetRecords for updates + AppendRecords for new. |
+| C-5 DO DeleteRecords needs ID — DeleteRecord broken | GET first to fetch existing records with IDs, then DeleteRecords with full records. Idempotent (no-op if not found). |
+| I-1 Makefile has no proto target | Removed "make proto" alternative; protoc is canonical. |
+| I-2 ExpandCredsMap export/case mismatch | Task 7 implements as exported `ExpandCredsMap` from the start. |
+| I-3 Audit functions wrong package | Extracted to `internal/dnsaudit/`. Step handler in plugin.go imports it without cyclical/wrong-direction dep. |
+| I-4 plugin.json diff malformed + wrong module names | Surgical edit instructions specify exact field changes; correct 13 module type names listed verbatim. |
+| m-1 MatchPattern empty-string test | Added `{"*", "", false}` test case. |
+| m-2 zoneFromFQDN naming | Kept name but documented as policy-name-only helper. Inline rename optional. |
+| m-3 SOA/NS doc note | Added implementer note + migration doc callout. |
+| m-4 miekg/dns absent from plan | Acknowledged in design; libdns handles 255-byte joining transparently. No miekg/dns dep needed. |
