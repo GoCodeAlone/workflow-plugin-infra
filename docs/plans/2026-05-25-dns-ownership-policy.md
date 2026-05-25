@@ -527,9 +527,20 @@ func (p *Policy) CheckAllowed(name, recordType, owner string) error {
     if explicitClaimer != "" {
         return fmt.Errorf("dnspolicy: denied — name=%q type=%s owner=%q; explicitly claimed by owner=%q", name, recordType, owner, explicitClaimer)
     }
-    // Phase 2: no explicit claim exists → fall back to default owner if caller is default
+    // Phase 2: no explicit claim exists → fall back to default owner if caller is default.
+    // (Closes plan-cycle-2 I-3) — also apply Types restriction here; non-empty e.Types restricts the default owner too.
     for _, e := range p.Entries {
         if e.Default && e.Owner == owner {
+            // Types restriction: empty = all-types-except-protected; non-empty = exact list
+            if len(e.Types) > 0 {
+                ok := false
+                for _, t := range e.Types {
+                    if t == recordType { ok = true; break }
+                }
+                if !ok {
+                    return fmt.Errorf("dnspolicy: denied — name=%q type=%s owner=%q; default owner restricted to types %v", name, recordType, owner, e.Types)
+                }
+            }
             if protectedTypes[recordType] && !isProtectedAllowed(e, recordType) {
                 return fmt.Errorf("dnspolicy: record type %s never delegated (zone-level only)", recordType)
             }
@@ -837,6 +848,31 @@ Append step entry to `plugin.contracts.json` "contracts" array:
   "output": "workflow.plugins.infra.v1.DNSRecordStepOutput"
 }
 ```
+
+**ALSO** (closes plan-cycle-2 C-1): patch `internal/plugin_test.go` — the existing kind-guards hard-fatalf on any non-module contract. Update both:
+
+```go
+// In TestContractDeclaresStrictModuleContracts (around line 46):
+for _, contract := range registry.Contracts {
+    if contract.Kind == pb.ContractKind_CONTRACT_KIND_STEP {
+        continue // step contracts validated in TestContractDeclaresStrictStepContracts (new)
+    }
+    if contract.Kind != pb.ContractKind_CONTRACT_KIND_MODULE {
+        t.Fatalf("unexpected contract kind %s", contract.Kind)
+    }
+    // ... existing module-key handling
+}
+
+// In loadManifestContracts (around line 184):
+if contract.Kind == "step" {
+    continue // skip; step contracts loaded separately
+}
+if contract.Kind != "module" {
+    t.Fatalf("unexpected contract kind %q in plugin.contracts.json", contract.Kind)
+}
+```
+
+Add new test `TestContractDeclaresStrictStepContracts` that asserts the step contract for `infra.dns_record` is registered with mode=strict + non-empty config/input/output descriptors.
 
 **Step 4: Run tests — PASS**
 
@@ -1405,17 +1441,22 @@ func TestCLIProvider_DispatchSubcommands(t *testing.T) {
     }
 }
 
-func TestAuditLog_AppendsAttemptThenOutcome(t *testing.T) {
-    tmp := t.TempDir()
-    t.Setenv("XDG_STATE_HOME", tmp)
-    LogAttempt("user@host", "example.com", "www", "A", "upsert", "multisite", "digitalocean")
-    LogOutcome("user@host", "example.com", "www", "A", "success", "")
-    path := tmp + "/wfctl/plugins/workflow-plugin-infra/dns-policy-audit.jsonl"
-    data, err := os.ReadFile(path)
-    if err != nil { t.Fatalf("read audit: %v", err) }
-    lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-    if len(lines) != 2 { t.Errorf("want 2 lines, got %d: %s", len(lines), data) }
-}
+// NOTE: audit test belongs in internal/dnsaudit/audit_test.go (NOT admincli)
+// since LogAttempt/LogOutcome are in package dnsaudit. Closes plan-cycle-2 C-2.
+
+// internal/dnsaudit/audit_test.go:
+//   package dnsaudit
+//   func TestAuditLog_AppendsAttemptThenOutcome(t *testing.T) {
+//       tmp := t.TempDir()
+//       t.Setenv("XDG_STATE_HOME", tmp)
+//       LogAttempt("user@host", "example.com", "www", "A", "upsert", "multisite", "digitalocean")
+//       LogOutcome("user@host", "example.com", "www", "A", "success", "")
+//       path := tmp + "/wfctl/plugins/workflow-plugin-infra/dns-policy-audit.jsonl"
+//       data, err := os.ReadFile(path)
+//       if err != nil { t.Fatalf("read audit: %v", err) }
+//       lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+//       if len(lines) != 2 { t.Errorf("want 2 lines, got %d: %s", len(lines), data) }
+//   }
 ```
 
 **Step 2: Run — FAIL** (undefined: CLIProvider, runAndCapture, LogAttempt, LogOutcome).
@@ -1630,7 +1671,7 @@ func main() {
 }
 ```
 
-**CRITICAL** (closes plan-cycle-1 C-2): `.goreleaser.yml:15` already injects ldflag `-X github.com/GoCodeAlone/workflow-plugin-infra/internal.Version={{ .Version }}`. Use `internal.Version` (existing pattern), NOT a new `main.Version` variable. The plugin already has `internal/version.go` defining `var Version = "0.0.0"`; new main.go imports it via `internal.Version`. No goreleaser change needed.
+**CRITICAL** (closes plan-cycle-1 C-2): `.goreleaser.yml:15` already injects ldflag `-X github.com/GoCodeAlone/workflow-plugin-infra/internal.Version={{ .Version }}`. Use `internal.Version` (existing pattern), NOT a new `main.Version` variable. The `Version` var is declared in `internal/plugin.go:25` (closes plan-cycle-2 m-1 — there's no separate version.go file, but the ldflag path is correct because the variable lives in package `internal`); new main.go imports it via `internal.Version`. No goreleaser change needed.
 
 Update `plugin.json` (surgical edits — closes plan-cycle-1 I-4):
 
@@ -1653,7 +1694,7 @@ Expected: smoke test PASS.
 
 Runtime-launch validation (build + invoke the binary with the contract dispatch + verify capabilities surface):
 ```bash
-GOWORK=off go build -ldflags "-X main.Version=v0.2.0-test" -o /tmp/wfi-test ./cmd/workflow-plugin-infra
+GOWORK=off go build -ldflags "-X github.com/GoCodeAlone/workflow-plugin-infra/internal.Version=v0.2.0-test" -o /tmp/wfi-test ./cmd/workflow-plugin-infra
 # Verify CLI dispatch surfaces correctly
 /tmp/wfi-test --wfctl-cli infra-dns 2>&1 | head -3
 # Expected first line: "usage: wfctl infra-dns <subcommand>"
@@ -1704,7 +1745,7 @@ GOWORK=off go test -count=1 -timeout 300s ./...
 GOWORK=off go vet ./...
 
 # 3. Build + verify-capabilities end-to-end
-GOWORK=off go build -ldflags "-X main.Version=v0.2.0-test" -o /tmp/wfi ./cmd/workflow-plugin-infra
+GOWORK=off go build -ldflags "-X github.com/GoCodeAlone/workflow-plugin-infra/internal.Version=v0.2.0-test" -o /tmp/wfi ./cmd/workflow-plugin-infra
 wfctl plugin verify-capabilities --binary /tmp/wfi .
 
 # 4. validate-contract pass
@@ -1733,6 +1774,19 @@ wfctl plugin validate-contract --for-publish --tag v0.2.0 .
 - Task 8 imports include `dnsaudit` (NEW package introduced in Task 9; if Task 8 commits before Task 9, mock the dnsaudit functions or order Task 9's dnsaudit-package extraction before Task 8's commit).
 - After Task 9: real CLI subcommand body (set-policy/drift/transfer-ownership/policy show) is implementer's craft — tests anchor the dispatch + audit shape; subcommand bodies follow standard flag-parsing + dnsprovider/dnspolicy calls.
 - **SOA/NS records**: gate refuses to mutate SOA/NS for ANY owner (including default-owner SRE) unless explicitly listed in that owner's `Types` field. This is intentional — DNS zone-level records should be managed via the DNS provider's console, not through automation. CLI help text + migration doc call this out (m-3).
+
+## Adversarial cycle 2 — findings resolved inline
+
+| Finding | Resolution |
+|---|---|
+| C-1 NEW plugin_test.go hard-fatalf on non-module contracts breaks Task 6 | Task 6 now includes patch instructions for both kind-guards in plugin_test.go to skip step contracts + add TestContractDeclaresStrictStepContracts. |
+| C-2 NEW Task 9 audit test in wrong package | Test moved into `internal/dnsaudit/audit_test.go` (`package dnsaudit`), calls LogAttempt/LogOutcome directly. admincli tests stay in admincli package. |
+| I-1 Task 10 manual build ldflag wrong symbol path | Replaced both `-X main.Version=...` with `-X github.com/GoCodeAlone/workflow-plugin-infra/internal.Version=...`. |
+| I-2 Priority int32→uint wraps on negative | Implementer must add `if priority < 0 { return error }` validation in step handler before adapter call (added to Task 7/8 implementer-notes). |
+| I-3 CheckAllowed phase-2 ignores Types restriction for default owner | Added Types restriction in phase-2; non-empty e.Types now limits default owner too. |
+| m-1 "internal/version.go" misleading prose | Corrected to "internal/plugin.go:25" (no separate version.go file). |
+| m-2 zoneFromFQDN narrow but safe | Accepted; latent footgun documented. |
+| m-3 buf.yaml not verified | Implementer verifies absence during impl; if buf is used, switch to `buf generate`. |
 
 ## Adversarial cycle 1 — findings resolved inline
 
