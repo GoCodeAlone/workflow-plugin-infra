@@ -7,6 +7,7 @@ import (
 	"os"
 
 	"github.com/GoCodeAlone/workflow-plugin-infra/internal/dnsaudit"
+	"github.com/GoCodeAlone/workflow-plugin-infra/internal/dnsgate"
 	"github.com/GoCodeAlone/workflow-plugin-infra/internal/dnspolicy"
 	"github.com/GoCodeAlone/workflow-plugin-infra/internal/dnsprovider"
 )
@@ -37,6 +38,10 @@ func transferOwnership(args []string) int {
 		fmt.Fprintln(os.Stderr, "transfer-ownership: --from and --to are required")
 		return 2
 	}
+	if *from == *to {
+		fmt.Fprintln(os.Stderr, "transfer-ownership: --from and --to must differ")
+		return 2
+	}
 
 	tok := *token
 	if tok == "" {
@@ -54,7 +59,7 @@ func transferOwnership(args []string) int {
 	}
 
 	ctx := context.Background()
-	policyName := "_workflow-dns-policy." + zone
+	policyName := dnsgate.PolicyName(zone)
 	existing, err := adapter.GetTXT(ctx, policyName)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "transfer-ownership: fetch policy: %v\n", err)

@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/GoCodeAlone/workflow-plugin-infra/internal/dnsgate"
 	"github.com/GoCodeAlone/workflow-plugin-infra/internal/dnspolicy"
 	"github.com/GoCodeAlone/workflow-plugin-infra/internal/dnsprovider"
 )
@@ -47,7 +48,7 @@ func drift(args []string) int {
 	}
 
 	ctx := context.Background()
-	policyName := "_workflow-dns-policy." + zone
+	policyName := dnsgate.PolicyName(zone)
 	rrs, err := adapter.GetTXT(ctx, policyName)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "drift: fetch policy: %v\n", err)

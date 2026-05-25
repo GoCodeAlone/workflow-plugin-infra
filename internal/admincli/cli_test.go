@@ -25,6 +25,20 @@ func runAndCapture(args []string) (int, string) {
 	return code, buf.String()
 }
 
+func TestTransferOwnership_RejectsSelfTransfer(t *testing.T) {
+	// dispatch with --from=sre --to=sre, expect exit code 2 + stderr contains "must differ".
+	// Note: Go's flag package stops at the first non-flag arg, so positional args
+	// must come after all flags.
+	code, out := runAndCapture([]string{"infra-dns", "transfer-ownership",
+		"--from=sre", "--to=sre", "--token=dummy", "example.com"})
+	if code != 2 {
+		t.Errorf("self-transfer: want exit code 2, got %d (out=%q)", code, out)
+	}
+	if !strings.Contains(out, "must differ") {
+		t.Errorf("self-transfer: want stderr to contain 'must differ', got %q", out)
+	}
+}
+
 func TestCLIProvider_DispatchSubcommands(t *testing.T) {
 	cases := []struct {
 		args       []string

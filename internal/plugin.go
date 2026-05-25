@@ -141,13 +141,17 @@ func (p *infraPlugin) TypedStepTypes() []string {
 
 // CreateTypedStep creates a typed step instance for infra.dns_record.
 func (p *infraPlugin) CreateTypedStep(typeName, name string, config *anypb.Any) (sdk.StepInstance, error) {
+	// cachingGate is shared across all executions of this step instance,
+	// amortizing GetTXT calls when a pipeline processes many records in one
+	// apply (one fetch per zone, not one per record).
+	cachingGate := dnsgate.NewCachingGate()
 	handler := func(ctx context.Context, req sdk.TypedStepRequest[*contracts.DNSRecordStepConfig, *contracts.DNSRecordStepInput]) (*sdk.TypedStepResult[*contracts.DNSRecordStepOutput], error) {
 		creds := dnsprovider.ExpandCredsMap(req.Config.ProviderCreds)
 		adapter, err := dnsprovider.NewAdapter(req.Config.Provider, creds)
 		if err != nil {
 			return nil, err
 		}
-		if gerr := dnsgate.Gate(ctx, adapter, req.Config.Zone, req.Input.Name, req.Input.RecordType, req.Input.Owner); gerr != nil {
+		if gerr := cachingGate.Check(ctx, adapter, req.Config.Zone, req.Input.Name, req.Input.RecordType, req.Input.Owner); gerr != nil {
 			dnsaudit.LogOutcome("step-execute", req.Config.Zone, req.Input.Name, req.Input.RecordType, "gate-denied", gerr.Error())
 			return &sdk.TypedStepResult[*contracts.DNSRecordStepOutput]{
 				Output: &contracts.DNSRecordStepOutput{Status: "gate-denied", DenialReason: gerr.Error()},

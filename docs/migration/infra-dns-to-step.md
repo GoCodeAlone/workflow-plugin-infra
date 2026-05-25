@@ -43,11 +43,23 @@ record at `_workflow-dns-policy.<zone>`. Use `wfctl infra-dns set-policy` to
 bootstrap the ownership policy:
 
 ```
-wfctl infra-dns set-policy example.com -f ownership/example.com.yaml --bootstrap --as-owner sre
+# Mark the sre team as the default (catch-all) owner:
+wfctl infra-dns set-policy example.com --owner sre --default --token "$DO_TOKEN"
+
+# Add a non-default owner with specific name patterns:
+wfctl infra-dns set-policy example.com --owner multisite --patterns www,admin --token "$DO_TOKEN"
 ```
 
 See the design doc at `docs/plans/2026-05-25-dns-ownership-policy-design.md`
 for policy format details and the `_workflow-dns-policy` TXT schema.
+
+## Future: file-input + bootstrap modes
+
+The v1 `set-policy` command takes individual owner entries via flags
+(`--owner`, `--patterns`, `--types`, `--default`, `--token`, `--ttl`).
+A future release will add `-f <yaml-file>` for bulk policy import and
+`--bootstrap` / `--overwrite-existing` flags for safer first-write guards
+(per the design's 6-case flag table).
 
 ## SOA/NS records
 

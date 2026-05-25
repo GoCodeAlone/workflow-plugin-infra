@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/GoCodeAlone/workflow-plugin-infra/internal/dnsaudit"
+	"github.com/GoCodeAlone/workflow-plugin-infra/internal/dnsgate"
 	"github.com/GoCodeAlone/workflow-plugin-infra/internal/dnspolicy"
 	"github.com/GoCodeAlone/workflow-plugin-infra/internal/dnsprovider"
 )
@@ -56,7 +57,7 @@ func setPolicy(args []string) int {
 	}
 
 	ctx := context.Background()
-	policyName := "_workflow-dns-policy." + zone
+	policyName := dnsgate.PolicyName(zone)
 	existing, err := adapter.GetTXT(ctx, policyName)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "set-policy: fetch existing policy: %v\n", err)

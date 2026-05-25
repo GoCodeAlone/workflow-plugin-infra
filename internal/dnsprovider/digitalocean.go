@@ -42,10 +42,46 @@ func (a *doAdapter) GetTXT(ctx context.Context, name string) ([]string, error) {
 	return out, nil
 }
 
-// upsertRecords: DO-specific pattern (closes plan-cycle-1 C-4 + C-5).
+// upsertTXTRRset replaces the entire TXT RRset at (relName) atomically:
+// delete all existing TXT records at that name, then append all desired values.
+// This matches Cloudflare's SetRecords semantic and avoids stale entries when
+// the desired set shrinks (e.g. removing one owner from a 3-owner policy).
+func (a *doAdapter) upsertTXTRRset(ctx context.Context, zone, relName string, values []string, ttl int) error {
+	existing, err := a.provider.GetRecords(ctx, zone)
+	if err != nil {
+		return fmt.Errorf("digitalocean: list records: %w (creds redacted)", err)
+	}
+	var toDelete []libdns.Record
+	for _, e := range existing {
+		rr := e.RR()
+		if rr.Type == "TXT" && rr.Name == relName {
+			toDelete = append(toDelete, e)
+		}
+	}
+	if len(toDelete) > 0 {
+		if _, err := a.provider.DeleteRecords(ctx, zone, toDelete); err != nil {
+			return fmt.Errorf("digitalocean: delete stale TXT: %w (creds redacted)", err)
+		}
+	}
+	if len(values) == 0 {
+		return nil
+	}
+	toAdd := make([]libdns.Record, len(values))
+	for i, v := range values {
+		toAdd[i] = libdns.RR{Type: "TXT", Name: relName, Data: v, TTL: time.Duration(ttl) * time.Second}
+	}
+	if _, err := a.provider.AppendRecords(ctx, zone, toAdd); err != nil {
+		return fmt.Errorf("digitalocean: append TXT: %w (creds redacted)", err)
+	}
+	return nil
+}
+
+// upsertRecords: DO-specific pattern for non-TXT single-record upserts
+// (closes plan-cycle-1 C-4 + C-5).
 // libdns/digitalocean SetRecords requires existing ID (via idFromRecord type-assert);
 // passing a new Record without ID errors with strconv.Atoi failure.
 // Use GET-then-AppendRecords (new) OR SetRecords-with-ID (existing) per-record.
+// For TXT RRset replacement use upsertTXTRRset instead.
 func (a *doAdapter) upsertRecords(ctx context.Context, zone string, desired []libdns.RR) ([]libdns.Record, error) {
 	existing, err := a.provider.GetRecords(ctx, zone)
 	if err != nil {
@@ -63,7 +99,14 @@ func (a *doAdapter) upsertRecords(ctx context.Context, zone string, desired []li
 				break
 			}
 			if errs.Type == d.Type && errs.Name == d.Name {
-				// Reuse the existing DNS record (with ID) but update Data+TTL
+				// Reuse the existing DNS record (with ID) but update Data+TTL.
+				// Guard the type-assert: if the provider returns an unexpected
+				// concrete type we cannot extract the ID, so return an error
+				// rather than panic.
+				dns, ok := e.(libdnsdo.DNS)
+				if !ok {
+					return nil, fmt.Errorf("digitalocean: unexpected record type %T, cannot extract ID", e)
+				}
 				updates = append(updates, libdnsdo.DNS{
 					Record: libdns.RR{
 						Name: d.Name,
@@ -71,7 +114,7 @@ func (a *doAdapter) upsertRecords(ctx context.Context, zone string, desired []li
 						Data: d.Data,
 						TTL:  d.TTL,
 					},
-					ID: e.(libdnsdo.DNS).ID,
+					ID: dns.ID,
 				})
 				matched = true
 				break
@@ -99,16 +142,13 @@ func (a *doAdapter) upsertRecords(ctx context.Context, zone string, desired []li
 	return out, nil
 }
 
-// UpsertTXT writes TXT values to the policy name.
+// UpsertTXT writes TXT values to the policy name using RRset-replace semantics:
+// all existing TXT records at the policy name are deleted, then the desired
+// values are appended. This prevents stale TXT entries when owners are removed.
 func (a *doAdapter) UpsertTXT(ctx context.Context, name string, values []string, ttl int) error {
 	zone := zoneFromPolicyName(name)
 	relName := relativeNameFromFQDN(name, zone)
-	recs := make([]libdns.RR, len(values))
-	for i, v := range values {
-		recs[i] = libdns.RR{Type: "TXT", Name: relName, Data: v, TTL: time.Duration(ttl) * time.Second}
-	}
-	_, err := a.upsertRecords(ctx, zone, recs)
-	return err
+	return a.upsertTXTRRset(ctx, zone, relName, values, ttl)
 }
 
 // UpsertRecord upserts an arbitrary DNS record.
