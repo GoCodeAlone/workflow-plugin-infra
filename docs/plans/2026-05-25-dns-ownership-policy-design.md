@@ -173,7 +173,9 @@ type Adapter interface {
 // NewAdapter uses a credentials MAP (not a single token) to support providers
 // with multi-part auth in future (Route53, GCP, Azure). v1 single-token
 // providers populate map with one key (e.g. {"token": "xxx"}).
-// (Closes adversarial cycle-5 I-1 — single-token signature was wrong for IAM-based providers.)
+// Provider name is case-folded via strings.ToLower internally; unknown provider
+// returns ErrUnknownProvider with the recognized provider list in the message.
+// (Closes adversarial cycle-5 I-1 + cycle-7 M-4 — case-insensitive matching.)
 func NewAdapter(provider string, creds map[string]string) (Adapter, error) { ... }
 
 // Apply is the post-gate DNS mutation entry point used by the infra.dns_record step.
@@ -261,12 +263,15 @@ func (p *infraPlugin) TypedStepTypes() []string {
 }
 func (p *infraPlugin) CreateTypedStep(typeName, name string, config *anypb.Any) (sdk.StepInstance, error) {
     handler := func(ctx context.Context, req sdk.TypedStepRequest[*contracts.DNSRecordStepConfig, *contracts.DNSRecordStepInput]) (*sdk.TypedStepResult[*contracts.DNSRecordStepOutput], error) {
-        // ProviderCreds field is map<string,string>; values resolved at config-load via ExpandEnvInMapPreservingVars
-        adapter, err := dnsprovider.NewAdapter(req.Config.Provider, req.Config.ProviderCreds)
+        // Resolve creds: template form (`{{ env "DO_TOKEN" }}`) is already pre-resolved
+        // by engine template pipeline; bare-shell form (`$DO_TOKEN`) is expanded here.
+        creds := expandCredsMap(req.Config.ProviderCreds)  // helper: applies os.ExpandEnv to each map value
+        adapter, err := dnsprovider.NewAdapter(req.Config.Provider, creds)  // NewAdapter case-folds provider name
         if err != nil { return nil, err }
         if gerr := dnsgate.Gate(ctx, adapter, req.Config.Zone, req.Input.Name, req.Input.RecordType, req.Input.Owner); gerr != nil {
             return &sdk.TypedStepResult[*contracts.DNSRecordStepOutput]{Output: &contracts.DNSRecordStepOutput{Status: "gate-denied", DenialReason: gerr.Error()}}, nil
         }
+        // Audit: log "apply attempted" before mutation; dnsprovider.Apply appends outcome
         return dnsprovider.Apply(ctx, adapter, req.Config, req.Input)
     }
     factory := sdk.NewTypedStepFactory[*contracts.DNSRecordStepConfig, *contracts.DNSRecordStepInput, *contracts.DNSRecordStepOutput](
@@ -436,11 +441,18 @@ All paths: NO gate check (bootstrap is the gate's exception). Trust = provider A
 
 **Audit log path**: `${XDG_STATE_HOME:-$HOME/.local/state}/wfctl/plugins/workflow-plugin-infra/dns-policy-audit.jsonl`. Per-line JSON entries: `{"ts","actor","zone","action","owners_added","owners_removed","records_added","records_removed","prior_sha256","new_sha256"}`. Append-only.
 
-**SHA256 input** (closes cycle-6 m-1): the canonical hash input is the sorted concatenation of TXT RR strings as returned by `dnspolicy.Serialize(policy)` (which produces a deterministic []string). Specifically: `sha256(strings.Join(sort.StringSlice(Serialize(policy)), "\n"))`. Two implementers run the algorithm on the same policy and produce the same hash. The sort ensures order-independence of the TXT RRs (DNS returns them in arbitrary order). `prior_sha256` = the hash of the policy fetched via `GetTXT` before the change; `new_sha256` = the hash of the policy after `Serialize`.
+**SHA256 input** (closes cycle-6 m-1 + cycle-7 M-3): the canonical hash input is the sorted concatenation of TXT RR strings as returned by `dnspolicy.Serialize(policy)`. `Serialize` deterministically sorts:
+1. Patterns WITHIN each entry (alphabetical) before CSV emission
+2. Types WITHIN each entry (alphabetical) before CSV emission
+3. Entry RR strings at the top level (alphabetical)
+
+Hash formula: `sha256(strings.Join(sort.StringSlice(Serialize(policy)), "\n"))`. Two implementers run the algorithm on the same policy and produce the same hash. Property tested via `Serialize(Parse(txt)) == Serialize(Parse(txt))` round-trip in unit tests. `prior_sha256` = hash of policy fetched via `GetTXT` before change; `new_sha256` = hash after `Serialize`.
 
 **Secret leakage** (closes cycle-6 m-2): `provider_creds` values must NEVER appear in error messages, audit logs, or stdout. The dnsprovider package wraps any provider auth error with a generic `fmt.Errorf("provider auth failed for %s: %w (creds redacted)", provider, err)` and discards the original error if it contained the credential bytes. Implementer guidance: any error path that interpolates the creds map must strip values before logging.
 
-There is no circular dependency: bootstrap binary does not invoke the gate. Subsequent app deploys go through `infra.dns_record` step → `dnsgate.Gate.CheckAllowed` → pass/fail.
+**Apply-attempt audit log** (closes cycle-7 M-5): before `dnsprovider.Apply` performs the actual DNS mutation, an audit log entry is written: `{"ts","actor","zone","name","record_type","operation","owner","provider","outcome":"attempted"}`. After Apply returns: a second entry is appended with `outcome="success"|"provider-error"` and the provider error message (redacted of creds). This ensures every gate-passed mutation has at least one log entry for forensic debugging — even if Apply fails post-gate-pass.
+
+There is no circular dependency: bootstrap binary does not invoke the gate. Subsequent app deploys go through `infra.dns_record` step → `dnsgate.Gate` (package-level function that internally calls `Policy.CheckAllowed`) → pass/fail. (Cycle-7 M-6 prose clarification.)
 
 ### Apex policy bootstrap edge case (revised — closes cycle-2 m-1)
 
