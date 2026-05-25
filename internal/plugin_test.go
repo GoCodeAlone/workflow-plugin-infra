@@ -1,10 +1,12 @@
 package internal
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/GoCodeAlone/workflow-plugin-infra/internal/contracts"
@@ -150,6 +152,61 @@ func TestTypedContainerServiceConfigMapsToLegacyModule(t *testing.T) {
 	env, ok := legacy.config["env"].(map[string]any)
 	if !ok || env["APP_ENV"] != "test" {
 		t.Fatalf("legacy env = %#v, want APP_ENV=test", legacy.config["env"])
+	}
+}
+
+func TestPlugin_StepTypes_Includes_DnsRecord(t *testing.T) {
+	p := NewInfraPlugin()
+	sp, ok := p.(sdk.StepProvider)
+	if !ok {
+		t.Fatal("expected StepProvider")
+	}
+	found := false
+	for _, st := range sp.StepTypes() {
+		if st == "infra.dns_record" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("infra.dns_record not in StepTypes(): %v", sp.StepTypes())
+	}
+}
+
+func TestPlugin_TypedStepTypes_Includes_DnsRecord(t *testing.T) {
+	p := NewInfraPlugin()
+	tsp, ok := p.(sdk.TypedStepProvider)
+	if !ok {
+		t.Fatal("expected TypedStepProvider")
+	}
+	found := false
+	for _, st := range tsp.TypedStepTypes() {
+		if st == "infra.dns_record" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("infra.dns_record not in TypedStepTypes(): %v", tsp.TypedStepTypes())
+	}
+}
+
+func TestInfraDnsModule_DeprecatedStartReturnsError(t *testing.T) {
+	p := NewInfraPlugin()
+	mp, ok := p.(sdk.ModuleProvider)
+	if !ok {
+		t.Fatal("expected ModuleProvider")
+	}
+	m, err := mp.CreateModule("infra.dns", "test", map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = m.Start(context.Background())
+	if err == nil {
+		t.Errorf("expected deprecation error from infra.dns Start()")
+	}
+	if !strings.Contains(err.Error(), "deprecated") {
+		t.Errorf("expected 'deprecated' in err, got %v", err)
 	}
 }
 
