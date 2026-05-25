@@ -136,10 +136,17 @@ func (p *infraPlugin) ContractRegistry() *pb.ContractRegistry {
 }
 
 func buildContractRegistry(definitions []infraModuleDefinition) *pb.ContractRegistry {
-	descriptors := make([]*pb.ContractDescriptor, 0, len(definitions))
+	descriptors := make([]*pb.ContractDescriptor, 0, len(definitions)+1)
 	for _, definition := range definitions {
 		descriptors = append(descriptors, moduleContract(definition.typeName, definition.configMessage))
 	}
+	// Step contracts
+	descriptors = append(descriptors, stepContract(
+		"infra.dns_record",
+		"DNSRecordStepConfig",
+		"DNSRecordStepInput",
+		"DNSRecordStepOutput",
+	))
 	return &pb.ContractRegistry{
 		FileDescriptorSet: &descriptorpb.FileDescriptorSet{
 			File: []*descriptorpb.FileDescriptorProto{
@@ -165,6 +172,18 @@ func moduleContract(moduleType, configMessage string) *pb.ContractDescriptor {
 		Kind:          pb.ContractKind_CONTRACT_KIND_MODULE,
 		ModuleType:    moduleType,
 		ConfigMessage: pkg + configMessage,
+		Mode:          pb.ContractMode_CONTRACT_MODE_STRICT_PROTO,
+	}
+}
+
+func stepContract(stepType, configMessage, inputMessage, outputMessage string) *pb.ContractDescriptor {
+	const pkg = "workflow.plugins.infra.v1."
+	return &pb.ContractDescriptor{
+		Kind:          pb.ContractKind_CONTRACT_KIND_STEP,
+		StepType:      stepType,
+		ConfigMessage: pkg + configMessage,
+		InputMessage:  pkg + inputMessage,
+		OutputMessage: pkg + outputMessage,
 		Mode:          pb.ContractMode_CONTRACT_MODE_STRICT_PROTO,
 	}
 }

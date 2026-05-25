@@ -42,6 +42,9 @@ func TestContractRegistryDeclaresStrictModuleContracts(t *testing.T) {
 	manifestContracts := loadManifestContracts(t)
 	contractsByKey := map[string]*pb.ContractDescriptor{}
 	for _, contract := range registry.Contracts {
+		if contract.Kind == pb.ContractKind_CONTRACT_KIND_STEP {
+			continue // step contracts validated in TestContractDeclaresStrictStepContracts
+		}
 		if contract.Kind != pb.ContractKind_CONTRACT_KIND_MODULE {
 			t.Fatalf("unexpected contract kind %s", contract.Kind)
 		}
@@ -69,8 +72,9 @@ func TestContractRegistryDeclaresStrictModuleContracts(t *testing.T) {
 			t.Fatalf("missing contract %s", key)
 		}
 	}
+	// manifestContracts only contains module contracts (step contracts skipped in loadManifestContracts)
 	if len(manifestContracts) != len(contractsByKey) {
-		t.Fatalf("plugin.contracts.json contract count = %d, runtime = %d", len(manifestContracts), len(contractsByKey))
+		t.Fatalf("plugin.contracts.json module contract count = %d, runtime = %d", len(manifestContracts), len(contractsByKey))
 	}
 }
 
@@ -149,6 +153,39 @@ func TestTypedContainerServiceConfigMapsToLegacyModule(t *testing.T) {
 	}
 }
 
+func TestContractDeclaresStrictStepContracts(t *testing.T) {
+	provider := NewInfraPlugin().(sdk.ContractProvider)
+	registry := provider.ContractRegistry()
+
+	var stepContracts []*pb.ContractDescriptor
+	for _, c := range registry.Contracts {
+		if c.Kind == pb.ContractKind_CONTRACT_KIND_STEP {
+			stepContracts = append(stepContracts, c)
+		}
+	}
+	found := false
+	for _, c := range stepContracts {
+		if c.StepType == "infra.dns_record" {
+			found = true
+			if c.Mode != pb.ContractMode_CONTRACT_MODE_STRICT_PROTO {
+				t.Errorf("infra.dns_record step contract mode = %s, want strict proto", c.Mode)
+			}
+			if c.ConfigMessage == "" {
+				t.Errorf("infra.dns_record step contract missing ConfigMessage")
+			}
+			if c.InputMessage == "" {
+				t.Errorf("infra.dns_record step contract missing InputMessage")
+			}
+			if c.OutputMessage == "" {
+				t.Errorf("infra.dns_record step contract missing OutputMessage")
+			}
+		}
+	}
+	if !found {
+		t.Errorf("infra.dns_record step contract not found in ContractRegistry")
+	}
+}
+
 type manifestContract struct {
 	Mode          string `json:"mode"`
 	ConfigMessage string `json:"config"`
@@ -180,6 +217,9 @@ func loadManifestContracts(t *testing.T) map[string]manifestContract {
 	}
 	contracts := make(map[string]manifestContract, len(manifest.Contracts))
 	for _, contract := range manifest.Contracts {
+		if contract.Kind == "step" {
+			continue // skip; step contracts loaded separately
+		}
 		if contract.Kind != "module" {
 			t.Fatalf("unexpected contract kind %q in plugin.contracts.json", contract.Kind)
 		}

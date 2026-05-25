@@ -78,6 +78,14 @@
       "type": "infra.certificate",
       "mode": "strict",
       "config": "workflow.plugins.infra.v1.CertificateConfig"
+    },
+    {
+      "kind": "step",
+      "type": "infra.dns_record",
+      "mode": "strict",
+      "config": "workflow.plugins.infra.v1.DNSRecordStepConfig",
+      "input":  "workflow.plugins.infra.v1.DNSRecordStepInput",
+      "output": "workflow.plugins.infra.v1.DNSRecordStepOutput"
     }
   ]
 }
