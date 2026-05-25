@@ -60,7 +60,7 @@ Field reference:
 | `o=<owner>` | yes | Canonical owner name. Short identifiers (e.g. `sre`, `multisite`, `bmw`, `ratchet`). Pattern: `[a-z0-9_-]{2,32}`. |
 | `p=<pattern-csv>` | yes | Comma-separated record-name patterns this owner manages. Pattern syntax: `*` matches a single DNS label segment, `**` matches multiple segments, `@` matches the apex. Examples: `www`, `admin`, `tour.*`, `_acme-challenge.*`. **Locked at v1** (was deferred; closed per adversarial m-4). |
 | `t=<rtype-csv>` | optional | Record-type scoping. Default: all types except `SOA` and `NS` (always SRE-only). Example: `t=A,AAAA,CNAME` restricts owner to those types. |
-| `d=true` | optional | Default-owner flag. **Exactly one RR per zone MAY set `d=true`; multiple → parse error.** Owner with `d=true` claims any record not matched by another owner's patterns. **Zero `d=true` RRs**: records matching no pattern fail-closed (no implicit default). Both behaviors are explicit at parse time (closes adversarial I-5). |
+| `d=true` | optional | Default-owner flag. **Exactly one RR per zone MAY set `d=true`; multiple → parse error AND serialize error.** `Parse()` returns `ErrMultipleDefaults`; `Serialize()` returns same error type before any TXT bytes are written. Owner with `d=true` claims any record not matched by another owner's patterns. **Zero `d=true` RRs**: records matching no pattern fail-closed (no implicit default). Both validation paths (parse + serialize) prevent invalid policies from reaching DNS (closes adversarial I-5 + cycle-2 m-3). |
 
 **Why short keys (`o=`, `p=`, `t=`, `d=`)**: TXT-string-byte conservation. See "TXT byte budget" below.
 
@@ -137,40 +137,106 @@ func Serialize(p *Policy) ([]string, error)
 func (p *Policy) CheckAllowed(name, recordType, owner string) error
 ```
 
-### Provider wiring path (revised — closes adversarial C-3)
+### Provider wiring path (revised — closes adversarial cycle-1 C-3 + cycle-2 I-1/I-2)
 
-The original design assumed an `IaCProvider` gRPC delegation chain that doesn't exist in workflow-plugin-infra yet (`internal/plugin.go:193` has a stub). **Revised approach**: use `libdns` directly. Each infra DNS step's config already includes a provider type and credentials. The apply step instantiates a libdns adapter for that provider; the adapter implements a thin `DNSPolicyReader` interface used by the gate.
+The original cycle-1 design assumed an `IaCProvider` gRPC delegation chain that doesn't exist (`internal/plugin.go:193` has a stub). Cycle-2 design proposed direct libdns import in the gate package, which couples gate to provider libraries.
+
+**Cycle-3 revised approach**: introduce a SEPARATE `internal/dnsprovider/` package that owns the libdns boundary. `internal/dnsgate/` and `internal/dnspolicy/` depend only on a small interface, not on libdns:
 
 ```go
-package dnspolicy
-
-// DNSPolicyReader is the minimal interface the gate needs from a DNS provider.
-// Implementations are thin wrappers over libdns/<provider>.
+// internal/dnspolicy/types.go
 type DNSPolicyReader interface {
     GetTXT(ctx context.Context, name string) ([]string, error)  // read policy RRs
     UpsertTXT(ctx context.Context, name string, values []string, ttl int) error  // write policy (bootstrap path only)
 }
+
+// internal/dnsprovider/adapter.go (THIS is the libdns boundary)
+package dnsprovider
+
+import (
+    "github.com/libdns/digitalocean"
+    "github.com/libdns/cloudflare"
+    // hover NOT in libdns — use workflow-plugin-hover gRPC instead
+    // see "Provider coverage matrix" below
+)
+
+func NewAdapter(provider, token string) (dnspolicy.DNSPolicyReader, error) { ... }
 ```
 
-The libdns ecosystem covers DO (libdns/digitalocean), Cloudflare (libdns/cloudflare), Hover (libdns/hover), Namecheap (libdns/namecheap), R53, GCP, Azure. Each adapter is ~100 lines. workflow-plugin-infra's infra.dns_record step instantiates the libdns provider directly from the step's config secrets. No gRPC delegation chain required.
+**Provider coverage matrix** (revised honestly per cycle-2 I-1):
 
-This removes the dependency on IaCProvider resolution and unblocks the gate immediately. (Future: if/when IaCProvider gRPC is built out, the gate can switch to it; the `DNSPolicyReader` interface stays stable.)
+| Provider | Adapter source | Status |
+|---|---|---|
+| DigitalOcean | `libdns/digitalocean` | ✓ exists |
+| Cloudflare | `libdns/cloudflare` | ✓ exists |
+| Namecheap | `libdns/namecheap` | ✓ exists |
+| Route53 (AWS) | `libdns/route53` | ✓ exists |
+| GCP Cloud DNS | `libdns/googleclouddns` | ✓ exists |
+| Azure DNS | `libdns/azure` | ✓ exists |
+| **Hover** | NO libdns adapter | ✗ — use `workflow-plugin-hover` gRPC plugin as the adapter implementation (existing plugin already talks to Hover via web-scraping) |
+| GoDaddy | `libdns/godaddy` | ✓ exists |
 
-### Owner identity + trust model (revised — closes adversarial C-2 + I-3)
+Hover gap: `workflow-plugin-hover` already implements DNS read/write against Hover's account UI (no API). For v1, wrap its existing gRPC interface into the `DNSPolicyReader` interface within `internal/dnsprovider/hover.go`. No new Hover dependency needed.
 
-**Owner identity at call time**: a new `owner` field is added to the infra.dns_record step's config (not the proto contract — config-level only). Example:
+**libdns dependency burden** (closes cycle-2 I-2): each libdns adapter is its own Go module. Isolating libdns imports to `internal/dnsprovider/` means:
+- API breakage in any libdns adapter only requires touching one file
+- Gate package (`internal/dnsgate/`) and policy package (`internal/dnspolicy/`) stay test-isolated with fake `DNSPolicyReader` implementations
+- Adding a new provider = adding one file under `internal/dnsprovider/`
+- Adapter packages can be loaded conditionally via build tags if dependency surface gets large enough to warrant (not v1 scope; flag as future option)
 
-```yaml
-- type: infra.dns_record
-  config:
-    zone: gocodealone.tech
-    owner: multisite          # NEW — declares calling owner identity
-    name: www
-    record_type: A
-    data: 1.2.3.4
-    provider: digitalocean
-    provider_token: $secret.do_token
+This removes the dependency on IaCProvider resolution and unblocks the gate immediately. (Future: if/when IaCProvider gRPC is built out, swap `dnsprovider` for an IaCProvider-based adapter; the `DNSPolicyReader` interface stays stable.)
+
+### Gate invocation site: new `infra.dns_record` STEP type (revised — closes adversarial cycle-2 C-2)
+
+The original cycle-2 design referenced `infra.dns_record` as if it existed — it does not. workflow-plugin-infra currently has only `infra.dns` MODULE (long-lived; with an unimplemented `Start()` stub at plugin.go:193). The gate's natural home is a discrete operation, not a module lifecycle.
+
+**Resolution**: register a NEW step type `infra.dns_record` in workflow-plugin-infra. Step types are additive (no breaking proto change). Define typed step input + output protos.
+
+```protobuf
+// internal/contracts/infra.proto — ADDITIVE additions
+
+message DNSRecordStepInput {
+  string zone        = 1;  // e.g. "gocodealone.tech"
+  string name        = 2;  // e.g. "www" (relative to zone) or "@" for apex
+  string record_type = 3;  // "A" | "AAAA" | "CNAME" | "TXT" | "MX" | "SRV" | ...
+  string data        = 4;  // record value (e.g. "1.2.3.4", "alias.target.")
+  int32  ttl         = 5;  // seconds; 0 = provider default
+  int32  priority    = 6;  // MX/SRV
+  string owner       = 7;  // *REQUIRED* — caller's owner identity for gate check
+  string operation   = 8;  // "upsert" (default) | "delete"
+  string provider    = 9;  // "digitalocean" | "cloudflare" | "hover" | ...
+  string provider_token_ref = 10; // YAML secret reference (engine resolves)
+}
+
+message DNSRecordStepOutput {
+  string status        = 1; // "ok" | "gate-denied" | "provider-error"
+  string record_id     = 2; // provider-assigned ID on upsert
+  string denial_reason = 3; // populated when status="gate-denied"
+}
 ```
+
+`owner` is a typed proto field — STRICT_PROTO validates it; YAML authors must supply it. Engine config-decode never silently drops it.
+
+Step registration in plugin.go:
+```go
+func (p *infraPlugin) StepTypes() []string {
+    return []string{"infra.dns_record"}
+}
+```
+
+The step's `Execute()` method is the gate fire site:
+1. Validate input (owner non-empty, zone/name/record_type valid).
+2. Resolve `provider_token_ref` → secret.
+3. Instantiate `DNSPolicyReader` via `internal/dnsprovider.NewAdapter(provider, token)`.
+4. Call `Gate(ctx, reader, zone, name, record_type, owner)` from `internal/dnsgate`.
+5. On gate pass: instantiate full provider client via libdns (or workflow-plugin-hover for Hover), perform upsert/delete.
+6. Return typed output.
+
+The previously-existing `infra.dns` MODULE remains untouched. Its `Start()` stub will be filled in or removed in a separate effort outside this design's scope.
+
+### Owner identity + trust model (revised — closes adversarial cycle-1 I-3 + cycle-2 C-1)
+
+**Owner identity at call time**: typed `owner` field in `DNSRecordStepInput` (see above). STRICT_PROTO enforced. Cannot be silently absent.
 
 The owner string is **caller-supplied and unverifiable by the gate alone**. This is an accepted v1 risk; the mitigation is the credential trust boundary:
 
@@ -206,9 +272,11 @@ For zones that never had a policy: `infra.dns_record` mutations against such zon
 
 This is one-time-per-zone setup. No circular dependency.
 
-### Apex policy bootstrap edge case
+### Apex policy bootstrap edge case (revised — closes cycle-2 m-1)
 
-For the FIRST zone to be policy-managed: SRE runs `set-policy` with `--bootstrap` flag (audit-logged) which writes the initial policy regardless of existing state. This bypasses any "policy must exist" precondition. For zones with a corrupted or partially-written policy: same flag.
+For the FIRST zone to be policy-managed: SRE runs `set-policy` with `--bootstrap` flag (audit-logged) which writes the initial policy regardless of existing state.
+
+**Overwrite guard**: `--bootstrap` requires `--overwrite-existing` if any RR matching the heritage sentinel already exists at `_workflow-dns-policy.<zone>`. Without the second flag, the command aborts with: `error: existing policy detected at _workflow-dns-policy.<zone>; re-run with --overwrite-existing to replace (audit-logged)`. This prevents accidental clobber of an existing policy via mis-invoked bootstrap.
 
 ### Multi-owner stranded-records recovery (closes adversarial I-2)
 
@@ -216,7 +284,7 @@ When SRE removes an owner from policy (e.g. retiring multisite), the gate enters
 
 1. **Drift detection** (`wfctl plugin infra dns drift <zone>`): records matching the removed owner's prior patterns are flagged as `orphaned-records` in the report — they exist in DNS but no current owner claims them.
 2. **Apply behavior**: by default, `infra.dns_record` applies do NOT delete orphaned records (apply is upsert-only by default; explicit `delete: true` requires `--force-orphaned` flag).
-3. **Transfer-ownership command**: `wfctl plugin infra dns transfer-records <zone> --from multisite --to sre --records www,admin` — emits a new policy RR with the records added to the target owner's patterns. Audit-logged.
+3. **Transfer-ownership command**: `wfctl plugin infra dns transfer-ownership <zone> --from multisite --to sre --records www,admin` — emits a new policy RR with the records added to the target owner's patterns. Audit-logged.
 
 This gives SRE a clean exit path: revoke delegation, then either delete orphaned records explicitly OR transfer them to a new owner.
 
@@ -266,23 +334,38 @@ For zones using managed DNSSEC (DO, Cloudflare, Route53 — all auto-resign on T
 4. Tooling: `wfctl plugin infra dns policy show <zone>` reads + pretty-prints. Implementation plan tasks include.
 5. Test fixtures: mock `DNSPolicyReader` via Go fakes. Trivial.
 
-## Adversarial cycle 1 findings — resolutions inline
+## Adversarial cycle 1 + 2 findings — resolutions inline
+
+### Cycle 1 (3 Critical + 5 Important + 5 Minor)
 
 | Finding | Resolution |
 |---|---|
 | C-1 Bootstrap circular dep | `set-policy` command bypasses Gate (different code path). Token-based trust suffices. |
-| C-2 No `owner` field in DNSConfig | Added `owner` config field at YAML config layer (not proto-level — additive, non-breaking). |
-| C-3 IaCProvider gRPC chain unimplemented | Use libdns directly via thin `DNSPolicyReader` interface. Skip the gRPC delegation. |
+| C-2 No `owner` field in DNSConfig | **Cycle-3 fix**: typed `owner` field on NEW `DNSRecordStepInput` proto (additive new step type, not modifying existing DNSConfig). STRICT_PROTO validates. |
+| C-3 IaCProvider gRPC chain unimplemented | Use libdns via isolated `internal/dnsprovider/` package; gate package stays libdns-free behind `DNSPolicyReader` interface. |
 | I-1 Heritage collision | Renamed label `_dns-mgmt` → `_workflow-dns-policy` (tool-scoped). Heritage sentinel preserved. |
-| I-2 Stranded records on owner removal | Added `transfer-records` command + `--force-orphaned` flag + drift detection of orphans. |
+| I-2 Stranded records on owner removal | Added `transfer-ownership` command + `--force-orphaned` flag + drift detection of orphans. |
 | I-3 Owner trust | Documented credential-trust-boundary mitigation; v2 path defined (provider WhoAmI). |
 | I-4 Race conditions | Documented as accepted v1 risk; v2 path (generation counter) defined. |
-| I-5 `d=true` ambiguity | Defined: multiple → parse error; zero → fail-closed for unmatched. |
+| I-5 `d=true` ambiguity | Defined: multiple → parse AND serialize error; zero → fail-closed for unmatched. |
 | m-1 EDNS0 budget optimism | Revised to 700-byte working budget; 4-5 owners per zone (not 5-6). |
 | m-2 ACME shorthand | Dropped per YAGNI. |
 | m-3 `pkg/` public surface | Moved to `internal/dnspolicy`. |
 | m-4 Pattern syntax deferred | Locked at v1: `*` single label, `**` multi-segment, `@` apex. |
 | m-5 DNSSEC | Documented; v1 scope = managed-DNSSEC zones only. |
+
+### Cycle 2 (2 NEW Critical + 3 Important + 3 Minor — introduced by cycle-1 fixes)
+
+| Finding | Resolution |
+|---|---|
+| **C-1 NEW** STRICT_PROTO rejects unknown root YAML keys; "config-level only owner" is wrong | Replaced with typed `owner` field in NEW `DNSRecordStepInput` proto. STRICT_PROTO validates; no silent drop. |
+| **C-2 NEW** `infra.dns_record` step type does not exist | Design now EXPLICITLY registers new step type in plugin.go. Lives separate from existing `infra.dns` module (which is untouched). |
+| I-1 NEW libdns/hover doesn't exist | Added explicit provider coverage matrix; Hover uses existing workflow-plugin-hover gRPC plugin as adapter (no libdns). |
+| I-2 NEW libdns module burden not acknowledged | Added `internal/dnsprovider/` package that isolates libdns boundary; gate/policy packages stay libdns-free. |
+| I-3 NEW C-3 fix regression (step/module conflation) | Resolved by C-2 NEW fix: explicit step-type registration is the gate fire site. |
+| m-1 `--bootstrap` overwrite guard missing | Added `--overwrite-existing` requirement when heritage-sentinel RR detected. Aborts otherwise. |
+| m-2 `transfer-records` naming misleading | Renamed to `transfer-ownership` throughout. |
+| m-3 `d=true` Serialize() validation missing | `Serialize()` now also validates multiple-default; returns ErrMultipleDefaults at write time before TXT bytes hit DNS. |
 
 ## Related issues
 
