@@ -316,19 +316,24 @@ YAML authors writing `type: infra.dns` get an immediate clear failure instead of
 
 The step's `Execute()` method is the gate fire site:
 1. Validate input (owner non-empty, zone/name/record_type valid).
-2. Resolve `provider_token_ref` → secret.
-3. Instantiate `DNSPolicyReader` via `internal/dnsprovider.NewAdapter(provider, token)`.
-4. Call `Gate(ctx, reader, zone, name, record_type, owner)` from `internal/dnsgate`.
-5. On gate pass: instantiate full provider client via libdns (or workflow-plugin-hover for Hover), perform upsert/delete.
+2. Resolve `provider_creds` values from env (see "Secret resolution path" below).
+3. Instantiate `Adapter` (satisfies both `DNSPolicyReader` + `DNSRecordWriter`) via `internal/dnsprovider.NewAdapter(provider, creds)`.
+4. Call `dnsgate.Gate(ctx, reader DNSPolicyReader, zone, name, record_type, owner) error` — narrow interface, accepts the Adapter (which satisfies it). Tests mock only the reader half. (Closes cycle-6 I-3.)
+5. On gate pass: call `dnsprovider.Apply(ctx, adapter, cfg, input)` which uses the `DNSRecordWriter` half to perform the actual upsert/delete.
 6. Return typed output.
 
-The previously-existing `infra.dns` MODULE remains untouched. Its `Start()` stub will be filled in or removed in a separate effort outside this design's scope.
+The previously-existing `infra.dns` MODULE registration in the plugin remains in `ModuleTypes()` for backwards compatibility, but its `Start()` is updated per the "infra.dns deprecation cleanup" section above to return a non-nil migration-hint error. (Resolves cycle-6 I-2 — earlier sentence "remains untouched" was stale; the cycle-3 m-3 fix actively modifies `Start()`.)
 
 ### Secret resolution path (closes adversarial cycle-4 I-4)
 
-`DNSRecordStepConfig.provider_token_ref` is a YAML reference using the standard workflow engine env-var substitution pattern (`${DO_TOKEN}`, `${CF_TOKEN}`, etc.). Resolution happens at config-load time via the engine's existing `config.ExpandEnvInMapPreservingVars` pipeline — BEFORE proto-encoding the step config. By the time the step's typed `Config.ProviderTokenRef` field is populated, it holds the resolved literal token string (not a placeholder).
+`DNSRecordStepConfig.provider_creds` values are env-substituted. **Two supported forms** (callers pick per YAML preference):
 
-This matches existing patterns in all 13 infra modules + cross-plugin IaC modules. No new SDK hook required. The `cmd/dns-policy-admin` binary uses the same env-var convention directly (reads `${DO_TOKEN}` etc. from its own environment at invocation time — GH Actions secrets pipe in via `env:` block).
+1. **Template form** (preferred, idiomatic): `provider_creds: {token: '{{ env "DO_TOKEN" }}'}`. Resolved by the engine's template pipeline (`s.tmpl.ResolveMap`) before the step Execute fires; the typed proto receives the resolved literal.
+2. **Bare-shell form**: `provider_creds: {token: '$DO_TOKEN'}`. The step handler explicitly calls `os.ExpandEnv` on each `provider_creds` value before passing to `dnsprovider.NewAdapter`. Documented as a convenience; template form is canonical.
+
+The admin CLI (`wfctl infra-dns ...`) is invoked from a shell where env vars are already exported (GH Actions `env:` block or local shell). The admin path reads `os.Getenv("DO_TOKEN")` directly when no YAML is involved.
+
+(Closes cycle-6 I-1: `ExpandEnvInMapPreservingVars` is only on module-config path, NOT step-config path — claim corrected. Cycle-6 C-2: stale `provider_token_ref` removed throughout.)
 
 ### Owner identity + trust model (revised — closes adversarial cycle-1 I-3 + cycle-2 C-1)
 
@@ -368,18 +373,33 @@ This addresses adversarial C-2 (owner availability) by adding the config field, 
 }
 ```
 2. `DispatchCLICommand` invokes: `<plugin-dir>/workflow-plugin-infra/workflow-plugin-infra --wfctl-cli infra-dns <subcommand> [args...]`
-3. The MAIN plugin binary's `main()` checks `os.Args` for the `--wfctl-cli` prefix:
+3. The MAIN plugin binary's `main()` uses `sdk.ServePluginFull` with a `CLIProvider` implementation (per `workflow-plugin-supply-chain/main.go` precedent — sdk handles `--wfctl-cli` dispatch + exit-code propagation):
 ```go
 func main() {
-    if len(os.Args) > 1 && os.Args[1] == "--wfctl-cli" {
-        admincli.Run(os.Args[2:])  // admincli is a new internal package
-        return
-    }
-    // existing plugin-server startup path
-    sdk.ServeIaCPlugin(...)
+    sdk.ServePluginFull(
+        plugin,                   // existing plugin provider
+        &admincli.CLIProvider{},  // new — implements sdk.CLIProvider.RunCLI(args []string) int
+        nil,                      // hooks
+        sdk.WithBuildVersion(sdk.ResolveBuildVersion(internal.Version)),
+    )
 }
 ```
-4. `internal/admincli/` implements the `infra-dns` subcommands using the SAME `internal/dnspolicy`, `internal/dnsprovider`, `internal/dnsgate` packages that the step uses. Code reuse, no duplicate logic.
+4. `internal/admincli/` exports a `CLIProvider` struct implementing `sdk.CLIProvider`:
+```go
+package admincli
+
+type CLIProvider struct{}
+
+// RunCLI receives the args AFTER the --wfctl-cli sentinel ([infra-dns, set-policy, <zone>, ...]).
+// Return code is propagated via os.Exit by ServePluginFull's DispatchArgs.
+func (c *CLIProvider) RunCLI(args []string) int {
+    // dispatch on args[0] ("infra-dns") then args[1] ("set-policy" / "drift" / etc.)
+    // returns 0 on success, nonzero on error
+}
+```
+5. `internal/admincli/` implements the `infra-dns` subcommands using the SAME `internal/dnspolicy`, `internal/dnsprovider`, `internal/dnsgate` packages that the step uses. Code reuse, no duplicate logic.
+
+(Closes cycle-6 C-1: prior cycle-5 manual-os.Args pattern bypassed `sdk.CLIProvider`, swallowed exit codes, used wrong serve function. Canonical pattern matches supply-chain plugin.)
 
 After install, operator gains (note: single binary handles both the plugin-server role AND the admin CLI role; `wfctl infra-dns` dispatches via `--wfctl-cli`):
 
@@ -414,7 +434,11 @@ The `set-policy` command has TWO modes:
 
 All paths: NO gate check (bootstrap is the gate's exception). Trust = provider API token holder.
 
-**Audit log path**: `${XDG_STATE_HOME:-$HOME/.local/state}/wfctl/plugins/workflow-plugin-infra/dns-policy-audit.jsonl`. Per-line JSON entries: `{"ts","actor","zone","action","owners_added","owners_removed","records_added","records_removed","prior_sha256","new_sha256"}`. Append-only. Closes cycle-5 m-2.
+**Audit log path**: `${XDG_STATE_HOME:-$HOME/.local/state}/wfctl/plugins/workflow-plugin-infra/dns-policy-audit.jsonl`. Per-line JSON entries: `{"ts","actor","zone","action","owners_added","owners_removed","records_added","records_removed","prior_sha256","new_sha256"}`. Append-only.
+
+**SHA256 input** (closes cycle-6 m-1): the canonical hash input is the sorted concatenation of TXT RR strings as returned by `dnspolicy.Serialize(policy)` (which produces a deterministic []string). Specifically: `sha256(strings.Join(sort.StringSlice(Serialize(policy)), "\n"))`. Two implementers run the algorithm on the same policy and produce the same hash. The sort ensures order-independence of the TXT RRs (DNS returns them in arbitrary order). `prior_sha256` = the hash of the policy fetched via `GetTXT` before the change; `new_sha256` = the hash of the policy after `Serialize`.
+
+**Secret leakage** (closes cycle-6 m-2): `provider_creds` values must NEVER appear in error messages, audit logs, or stdout. The dnsprovider package wraps any provider auth error with a generic `fmt.Errorf("provider auth failed for %s: %w (creds redacted)", provider, err)` and discards the original error if it contained the credential bytes. Implementer guidance: any error path that interpolates the creds map must strip values before logging.
 
 There is no circular dependency: bootstrap binary does not invoke the gate. Subsequent app deploys go through `infra.dns_record` step → `dnsgate.Gate.CheckAllowed` → pass/fail.
 
@@ -512,6 +536,19 @@ For zones using managed DNSSEC (DO, Cloudflare, Route53 — all auto-resign on T
 | m-1 `--bootstrap` overwrite guard missing | Added `--overwrite-existing` requirement when heritage-sentinel RR detected. Aborts otherwise. |
 | m-2 `transfer-records` naming misleading | Renamed to `transfer-ownership` throughout. |
 | m-3 `d=true` Serialize() validation missing | `Serialize()` now also validates multiple-default; returns ErrMultipleDefaults at write time before TXT bytes hit DNS. |
+
+### Cycle 6 (2 NEW Critical + 3 Important + 3 Minor)
+
+| Finding | Resolution |
+|---|---|
+| **C-1 NEW** Manual os.Args + sdk.ServeIaCPlugin pattern wrong; swallows exit codes | Switched to `sdk.ServePluginFull(plugin, &admincli.CLIProvider{}, nil, opts...)` matching `workflow-plugin-supply-chain/main.go` precedent. CLIProvider.RunCLI returns int → propagated via os.Exit. |
+| **C-2 NEW** Stale `provider_token_ref`/`ProviderTokenRef` references contradict proto | Replaced throughout with `provider_creds`/`ProviderCreds`. Execute step + Secret resolution path updated. |
+| I-1 NEW `ExpandEnvInMapPreservingVars` not on step-config path | Corrected: documented BOTH template form (`{{ env "DO_TOKEN" }}`) AND bare-shell form (handler does `os.ExpandEnv`). |
+| I-2 NEW "infra.dns module remains untouched" contradicts deprecation cleanup | Sentence rewritten: module registration retained, Start() updated per the cleanup section above. |
+| I-3 NEW dnsgate.Gate parameter type ambiguous | Explicit: `dnsgate.Gate(ctx, reader DNSPolicyReader, ...)` — narrow interface, accepts Adapter via satisfaction. Tests mock only reader. |
+| m-1 NEW prior/new sha256 input undefined | Defined: `sha256(strings.Join(sort.StringSlice(Serialize(policy)), "\n"))`. Deterministic + order-independent. |
+| m-2 NEW Secret leakage in error messages | Added explicit guidance: dnsprovider auth errors must redact creds; generic wrapper pattern documented. |
+| m-3 Cycle-5 C-1 fix superseded | Folded into cycle-6 C-1 resolution. |
 
 ### Cycle 5 (2 NEW Critical + 3 Important + 2 Minor — introduced by cycle-4 fixes)
 
