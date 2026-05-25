@@ -27,6 +27,7 @@
 - Provider WhoAmI / token-bound owner verification (v2)
 - Cross-driver ownership-tagging convention beyond DNS (tracked at workflow#779)
 - `infra.dns` module rewrite (deprecated to migration-error stub only)
+- `gocodealone-dns/ownership/<zone>.yaml` mirror + import-from-live-TXT script — separate-repo deliverable for gocodealone-dns; out-of-scope for this workflow-plugin-infra PR. Filed as gocodealone-dns followup issue (track post-merge).
 
 **PR Grouping:**
 
@@ -736,6 +737,7 @@ package dnsgate
 import (
     "context"
     "fmt"
+    "sync"
 
     "github.com/GoCodeAlone/workflow-plugin-infra/internal/dnspolicy"
 )
@@ -743,21 +745,64 @@ import (
 // PolicyName returns the TXT name where policy lives for a zone.
 func PolicyName(zone string) string { return "_workflow-dns-policy." + zone }
 
-// Gate validates that owner may mutate (name, recordType) in zone per the live policy.
-// Returns nil on pass; descriptive error on denial or fetch/parse failure.
+// policyCache holds per-zone parsed policies for the lifetime of one Gate
+// holder (e.g. one wfctl apply invocation = one *Gate instance).
+// Closes design "Open questions §3" + alignment-check missing-item (per-zone cache).
+type policyCache struct {
+    mu    sync.RWMutex
+    zones map[string]*dnspolicy.Policy
+}
+
+// NewCachingGate returns a Gate-call wrapper with per-zone caching.
+// One *CachingGate per wfctl apply invocation; releases at end of invocation (no TTL).
+type CachingGate struct{ c *policyCache }
+
+func NewCachingGate() *CachingGate { return &CachingGate{c: &policyCache{zones: map[string]*dnspolicy.Policy{}}} }
+
+// Check is the cached entry point used by infra.dns_record step handlers
+// processing multiple records in one apply (single GetTXT per zone, not per record).
+func (g *CachingGate) Check(ctx context.Context, reader dnspolicy.DNSPolicyReader, zone, name, recordType, owner string) error {
+    g.c.mu.RLock()
+    cached, ok := g.c.zones[zone]
+    g.c.mu.RUnlock()
+    if !ok {
+        rrs, err := reader.GetTXT(ctx, PolicyName(zone))
+        if err != nil { return fmt.Errorf("dnsgate: fetch policy: %w", err) }
+        cached, err = dnspolicy.Parse(zone, rrs)
+        if err != nil { return err }
+        if len(cached.Entries) == 0 {
+            return fmt.Errorf("dnsgate: fail-closed — no policy found at %s", PolicyName(zone))
+        }
+        g.c.mu.Lock()
+        g.c.zones[zone] = cached
+        g.c.mu.Unlock()
+    }
+    return cached.CheckAllowed(name, recordType, owner)
+}
+
+// Gate is the uncached entry point (one GetTXT per call). Use this for
+// one-off invocations (CLI commands, integration tests). For step handlers
+// processing many records in one apply, use NewCachingGate + Check.
 func Gate(ctx context.Context, reader dnspolicy.DNSPolicyReader, zone, name, recordType, owner string) error {
-    rrs, err := reader.GetTXT(ctx, PolicyName(zone))
-    if err != nil {
-        return fmt.Errorf("dnsgate: fetch policy: %w", err)
-    }
-    policy, err := dnspolicy.Parse(zone, rrs)
-    if err != nil { return err }
-    if len(policy.Entries) == 0 {
-        return fmt.Errorf("dnsgate: fail-closed — no policy found at %s", PolicyName(zone))
-    }
-    return policy.CheckAllowed(name, recordType, owner)
+    return NewCachingGate().Check(ctx, reader, zone, name, recordType, owner)
 }
 ```
+
+Add a test for the cache:
+```go
+func TestCachingGate_OneGetTXTPerZone(t *testing.T) {
+    calls := 0
+    reader := &countingReader{txtRRs: []string{`heritage=wfinfra-v1 o=sre d=true`}, callCounter: &calls}
+    g := NewCachingGate()
+    for i := 0; i < 10; i++ {
+        if err := g.Check(context.Background(), reader, "z.com", fmt.Sprintf("name%d", i), "A", "sre"); err != nil {
+            t.Fatalf("call %d: %v", i, err)
+        }
+    }
+    if calls != 1 { t.Errorf("want 1 GetTXT call across 10 Check invocations; got %d", calls) }
+}
+```
+(`countingReader` is a fakeReader that increments calls per GetTXT.)
 
 **Step 4: Run tests — PASS**
 
