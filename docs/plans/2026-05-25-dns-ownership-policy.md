@@ -1092,6 +1092,9 @@ func (a *doAdapter) UpsertTXT(ctx context.Context, name string, values []string,
 }
 
 func (a *doAdapter) UpsertRecord(ctx context.Context, zone, name, recordType, data string, ttl, priority int32) (string, error) {
+    if priority < 0 {
+        return "", fmt.Errorf("dnsprovider: priority must be >= 0, got %d", priority)
+    }
     rec := libdns.Record{Type: recordType, Name: name, Value: data, TTL: time.Duration(ttl) * time.Second, Priority: uint(priority)}
     out, err := a.upsertRecords(ctx, zone, []libdns.Record{rec})
     if err != nil { return "", err }
