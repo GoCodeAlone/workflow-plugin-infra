@@ -300,33 +300,64 @@ Add Copilot reviewer per memory feedback (skip per memory `feedback_copilot_revi
 
 Before writing code, the implementer runs `grep -n 'type cfProvider' internal/iacserver.go` to confirm the struct's exact fields. As of v0.x cfProvider has `dnsDriver *drivers.DNSDriver` + `domainDriver *drivers.DomainDriver` — there is NO `client` field. The new EnumerateAll path needs an account-level zone client; add it via dependency injection.
 
-**Step 1: Extend cfProvider w/ zoneLister field**
+**Step 1: Define minimal zonePager interface + zoneListerCF**
 
-In `internal/iacserver.go`, add a small interface + field to cfProvider:
+cloudflare-go/v7's AutoPager is a concrete type that's hard to construct from a slice in tests. Define a small interface in `internal/iacserver.go` that captures only the methods cfProvider uses:
 
 ```go
+// zonePager is the minimal iterator surface EnumerateAll needs.
+// Both cloudflare-go's *pagination.V4PagePaginationArrayAutoPager[zones.Zone]
+// and the test fake satisfy this interface via standard method names.
+type zonePager interface {
+    Next() bool
+    Current() zones.Zone
+    Err() error
+}
+
 type zoneListerCF interface {
-    // ListZones returns the cloudflare-go v7 AutoPager iterator that
-    // exposes Next()/Current()/Err() over the account's zones.
-    ListZones(ctx context.Context, query zones.ZoneListParams, opts ...option.RequestOption) *pagination.V4PagePaginationArrayAutoPager[zones.Zone]
+    // ListZones returns a zonePager iterating the account's zones.
+    ListZones(ctx context.Context, query zones.ZoneListParams) zonePager
 }
 
 type cfProvider struct {
     dnsDriver    *drivers.DNSDriver
     domainDriver *drivers.DomainDriver
-    zones        zoneListerCF  // injected; concrete = (*cfsdk.Client).Zones
+    zones        zoneListerCF  // injected; concrete adapter wraps SDK AutoPager
 }
 ```
 
-`Initialize()` (existing) sets `p.zones = sdkClient.Zones` after credentials are wired.
-
-**Step 2: Write failing test**
+`Initialize()` (existing) constructs a concrete `zoneListerCF` whose `ListZones` calls `sdkClient.Zones.ListAutoPaging(ctx, query)` and returns the AutoPager (which already implements `Next()/Current()/Err()`):
 
 ```go
-type fakeZoneLister struct{ items []zones.Zone }
+type cfRealZoneLister struct{ client *cloudflare.Client }
+func (l *cfRealZoneLister) ListZones(ctx context.Context, q zones.ZoneListParams) zonePager {
+    return l.client.Zones.ListAutoPaging(ctx, q) // returns *V4PagePaginationArrayAutoPager which satisfies zonePager
+}
+```
 
-func (f *fakeZoneLister) ListZones(_ context.Context, _ zones.ZoneListParams, _ ...option.RequestOption) *pagination.V4PagePaginationArrayAutoPager[zones.Zone] {
-    return pagination.NewArrayAutoPagerFromSlice(f.items) // helper if cloudflare-go provides; else build a minimal stub matching the AutoPager API
+The exact return-type satisfaction is verified at compile time by Go's structural typing; if the AutoPager's `Current()` returns `Zone` (not `*Zone`), the interface matches directly. If signature differs (e.g., `Current() *Zone`), adjust the interface OR wrap in a thin adapter.
+
+**Step 2: Write failing test (slice-backed stub)**
+
+```go
+type slicePager struct {
+    items []zones.Zone
+    i     int
+    cur   zones.Zone
+    err   error
+}
+func (p *slicePager) Next() bool {
+    if p.i >= len(p.items) { return false }
+    p.cur = p.items[p.i]
+    p.i++
+    return true
+}
+func (p *slicePager) Current() zones.Zone { return p.cur }
+func (p *slicePager) Err() error { return p.err }
+
+type fakeZoneLister struct{ items []zones.Zone }
+func (f *fakeZoneLister) ListZones(_ context.Context, _ zones.ZoneListParams) zonePager {
+    return &slicePager{items: f.items}
 }
 
 func TestCfProvider_EnumerateAll_DNS(t *testing.T) {
@@ -338,13 +369,13 @@ func TestCfProvider_EnumerateAll_DNS(t *testing.T) {
     out, err := p.EnumerateAll(ctx, "infra.dns")
     if err != nil { t.Fatalf("EnumerateAll: %v", err) }
     if len(out) != 2 { t.Fatalf("want 2; got %d", len(out)) }
-    if out[0].ProviderID != "zid-1" { t.Errorf("providerID[0] = %v", out[0].ProviderID) }
+    if out[0].ProviderID != "zid-1" { t.Errorf("providerID[0]") }
     if out[0].Outputs["zone"] != "alpha.test" { t.Errorf("zone[0]") }
     if out[0].Outputs["account_id"] != "acct-1" { t.Errorf("account_id[0]") }
 }
 ```
 
-If cloudflare-go does NOT expose a slice-based AutoPager constructor, the test stub implements just the methods cfProvider's EnumerateAll calls (`Next() bool`, `Current() Zone`, `Err() error`) — define a tiny `zonePager` interface in `internal/iacserver.go` that wraps both the real AutoPager and the test fake.
+No reliance on `pagination.NewArrayAutoPagerFromSlice` (which doesn't exist). The 3-method `zonePager` interface is the entire test surface.
 
 **Step 2: Run failing test**
 
@@ -364,14 +395,14 @@ git commit -m "test(provider): add failing EnumerateAll infra.dns coverage"
 - Modify: `internal/iacserver.go` (add EnumerateAll method to cfProvider)
 - Modify: `internal/drivers/dns.go` (sdkClient ListZones method if not present)
 
-**Step 3: Add EnumerateAll to cfProvider using AutoPager iterator pattern**
+**Step 3: Add EnumerateAll to cfProvider using zonePager iterator**
 
 In `internal/iacserver.go`:
 
 ```go
 // EnumerateAll implements interfaces.EnumeratorAll for infra.dns. Pages via
-// cloudflare-go/v7 Zones.ListAutoPaging, which returns a V4PagePaginationArrayAutoPager
-// exposing Next()/Current()/Err(). Per-zone account_id captured for downstream Import.
+// the injected zoneListerCF (production wraps cloudflare-go/v7
+// Zones.ListAutoPaging). Per-zone account_id captured for downstream Import.
 func (p *cfProvider) EnumerateAll(ctx context.Context, resourceType string) ([]*interfaces.ResourceOutput, error) {
     if p.zones == nil {
         return nil, fmt.Errorf("cloudflare: EnumerateAll called on uninitialized provider")
@@ -400,7 +431,7 @@ func (p *cfProvider) EnumerateAll(ctx context.Context, resourceType string) ([]*
 }
 ```
 
-`zones.ListAutoPaging` returns `*pagination.V4PagePaginationArrayAutoPager[zones.Zone]` (verified in `cloudflare-go/v7/zones/zone.go`). The iterator uses `Next() bool / Current() Zone / Err() error` — NOT `iter.Seq2`. Verify the exact import path + return type at implementation start via `go doc cloudflare.com/v7/zones`.
+Verify exact AutoPager method-set at implementation start via `go doc github.com/cloudflare/cloudflare-go/v7/zones` — if `Current()` returns `*Zone` not `Zone`, adjust the `zonePager` interface accordingly.
 
 **Step 3: Run unit tests**
 
@@ -862,12 +893,19 @@ Per `feedback_version_bump_immediate_merge.md`: version-pin manifest changes aut
 
 For each provider manifest, update the `version:` field to the tag published after its respective PR (1-4) landed. Exact version numbers determined at PR-landing time; no hardcoded values here.
 
-**Step 2: Validate manifests**
+**Step 2: Validate manifests via existing ValidateManifest helper**
+
+There is no `wfctl plugin registry-validate` subcommand (verified cycle-2 adversarial). Use one of:
+
+- (a) `wfctl plugin validate <path>` for each manifest file individually (if validates registry manifests — verify with `wfctl plugin --help` at impl time)
+- (b) Inline Go test calling the existing `ValidateManifest()` function exported from `cmd/wfctl/registry_validate.go`:
 
 ```bash
-wfctl plugin registry-validate manifests/
-# Expect: all 4 manifests valid
+# Quick inline check:
+GOWORK=off go run -tags scripts ./scripts/validate-manifests.go manifests/
 ```
+
+`scripts/validate-manifests.go` is a small wrapper (~20 LOC) that loads each YAML, unmarshals to `RegistryManifest`, calls `ValidateManifest`, and reports errors. If workflow-registry repo has CI that already does this on PR, the local-validation step can be skipped — verify CI behavior at PR-open time.
 
 **Step 3: Commit + push + auto-merge PR**
 
@@ -1014,8 +1052,8 @@ Use the package-private `infraStateStore` interface (the same type returned by `
 
 ```go
 func runInfraImportAllWithDeps(ctx context.Context, provider interfaces.IaCProvider, store infraStateStore, resourceType string, dryRun bool) (int, error) {
-    enumerator, ok := provider.(interfaces.Enumerator)
-    if !ok { return 0, fmt.Errorf("provider does not implement EnumerateAll") }
+    enumerator, ok := provider.(interfaces.EnumeratorAll)
+    if !ok { return 0, fmt.Errorf("provider does not implement EnumerateAll (interfaces.EnumeratorAll)") }
     outputs, err := enumerator.EnumerateAll(ctx, resourceType)
     if err != nil { return 0, fmt.Errorf("enumerate: %w", err) }
     imported := 0
@@ -1069,7 +1107,25 @@ fmt.Printf("imported %d zones\n", n)
 return err
 ```
 
-`dumpStateToFile` walks the just-saved state via `store.ListResources` (the package-private interface either already has it or needs a small extension — verify at impl time) and writes a JSON snapshot to `outputPath`. The variable name is `configFile` (matches Task 14's flag binding), not `cfgFile`.
+`dumpStateToFile` is a new helper (implementation below). The variable name is `configFile` (matches Task 14's flag binding), not `cfgFile`.
+
+```go
+// dumpStateToFile snapshots the current state-store contents to outputPath
+// as a JSON array of ResourceState. Intended for scenario test harnesses
+// that diff state across runs without re-reading the live state backend.
+func dumpStateToFile(ctx context.Context, store infraStateStore, path string) error {
+    resources, err := store.ListResources(ctx)
+    if err != nil { return fmt.Errorf("list resources: %w", err) }
+    data, err := json.MarshalIndent(map[string]any{"resources": resources}, "", "  ")
+    if err != nil { return fmt.Errorf("marshal: %w", err) }
+    if err := os.WriteFile(path, data, 0o600); err != nil {
+        return fmt.Errorf("write %s: %w", path, err)
+    }
+    return nil
+}
+```
+
+`infraStateStore.ListResources(ctx)` is expected to exist on the package-private interface. Verify via `grep -n 'ListResources' cmd/wfctl/infra_state_store.go` at implementation start; if absent, add it to the interface + each implementor (in-memory + on-disk) in this same task — small extension, ~30 LOC.
 
 ```bash
 GOWORK=off go test ./cmd/wfctl/...
@@ -1835,32 +1891,44 @@ git commit -m "feat(scenarios): 89 dns-import-export-roundtrip — import then p
 - Create: `scenarios/90-dns-cross-provider-transfer/config/lossiness.yaml`
 - Create: `scenarios/90-dns-cross-provider-transfer/test/run.sh`
 - Create: `scenarios/90-dns-cross-provider-transfer/test/verify-transfer.py`
+- Create: `scenarios/90-dns-cross-provider-transfer/test/translate-state-to-config.py`
 
 **Step 1: Two stub providers**
 
 Configure two stub provider instances (stub-A as DO equivalent, stub-B as CF equivalent). Each loads same record set via fixture.
 
-**Step 2: test/run.sh**
+**Step 2: test/run.sh — config-driven cross-provider apply (no --state-file required)**
+
+`wfctl infra apply --state-file=...` does not exist (verified cycle-2). Use a config-driven path: the source-side import populates state-A's backend; a translation step generates a target-side config that re-declares the same resources with provider=stub-B; `wfctl infra apply` against the target config dispatches Create on stub-B for each zone in the new config. Then re-import-all from stub-B and diff.
 
 ```bash
 #!/usr/bin/env bash
 set -euo pipefail
 PASS=0; FAIL=0; SKIP=0
-# Import from source via --output flag
+
+# 1. Import from source provider into source state backend + dump
+wfctl infra apply --config=../config/source.yaml --provider=stub-A && PASS=$((PASS+1)) || FAIL=$((FAIL+1))   # populate stub-A
 wfctl infra import-all --config=../config/source.yaml --provider=stub-A --type=infra.dns --output=/tmp/source-state.json && PASS=$((PASS+1)) || FAIL=$((FAIL+1))
-# Translate state: rewrite provider field to stub-B for re-apply
-jq '.resources[].provider = "stub-B"' /tmp/source-state.json > /tmp/target-state.json
-# Apply to target (using --state-file if wfctl supports state-file import for apply; else use a config-driven import path)
-wfctl infra apply --config=../config/target.yaml --state-file=/tmp/target-state.json && PASS=$((PASS+1)) || FAIL=$((FAIL+1))
-# Read back from target
-wfctl infra import-all --config=../config/target.yaml --provider=stub-B --type=infra.dns --output=/tmp/roundtrip-state.json && PASS=$((PASS+1)) || FAIL=$((FAIL+1))
-# Assert (type, name, data, ttl) equality per record per zone, EXCLUDING fields in lossiness.yaml
+
+# 2. Translate source state → target config YAML
+#    (a small helper script that reads source-state.json and emits target.yaml
+#    with the same resources but provider field rewritten to stub-B)
+python3 ./translate-state-to-config.py /tmp/source-state.json stub-B > /tmp/target-generated.yaml || FAIL=$((FAIL+1))
+
+# 3. Apply translated config to target provider
+wfctl infra apply --config=/tmp/target-generated.yaml --provider=stub-B && PASS=$((PASS+1)) || FAIL=$((FAIL+1))
+
+# 4. Import-all back from target + dump
+wfctl infra import-all --config=/tmp/target-generated.yaml --provider=stub-B --type=infra.dns --output=/tmp/roundtrip-state.json && PASS=$((PASS+1)) || FAIL=$((FAIL+1))
+
+# 5. Diff source vs roundtrip with per-(provider, record_type, field) exclusions
 python3 ./verify-transfer.py /tmp/source-state.json /tmp/roundtrip-state.json ../config/lossiness.yaml && PASS=$((PASS+1)) || FAIL=$((FAIL+1))
+
 echo "PASS=$PASS FAIL=$FAIL SKIP=$SKIP"
 [ $FAIL -eq 0 ]
 ```
 
-Note: `--output` flag is the one added in Task 14 (cycle-2 finding C5). If `wfctl infra apply --state-file=…` is not yet a supported flag, replace step 2 with a config-driven apply that consumes the source-state.json via a state-backend import step. Verify wfctl's apply flag surface at implementation start.
+`translate-state-to-config.py` is a small (~30 LOC) helper in the same `test/` dir. It reads source-state.json, walks `.resources`, emits the equivalent YAML with `provider:` swapped. The transfer is config-driven; no `--state-file` flag needed.
 
 **Step 3: Lossiness charter**
 
@@ -1983,4 +2051,5 @@ Design: workflow-plugin-infra/docs/plans/2026-05-26-dns-provider-contract-design
 | Date | Author | Change |
 |---|---|---|
 | 2026-05-26 | codingsloth@pm.me | Initial plan draft (cycle 1). Mirrors design cycle 3.5. 8 PRs, 32 tasks, 6 repos. |
+| 2026-05-26 | codingsloth@pm.me | Plan cycle 3 — addresses adversarial cycle 2 findings. (C2-NEW) Task 15 runtime dispatch now asserts `interfaces.EnumeratorAll` not `interfaces.Enumerator` (the original I1 fix was applied to the compile-time assertion only, missed the runtime dispatch). (C3-NEW) CF test stub dropped reference to nonexistent `pagination.NewArrayAutoPagerFromSlice`; instead define minimal `zonePager` interface (`Next() bool / Current() Zone / Err() error`) that both the real AutoPager and a `slicePager` test fake satisfy. (C4-NEW) `wfctl plugin registry-validate` doesn't exist; replaced with explicit Go-test or `wfctl plugin validate <path>` per-manifest fallback. (I1-CYCLE2) Task 31 reworked to use config-driven cross-provider apply path (no `--state-file` flag; added `translate-state-to-config.py` helper). (I2-CYCLE2) `dumpStateToFile` now has explicit implementation block w/ `infraStateStore.ListResources` extension note. |
 | 2026-05-26 | codingsloth@pm.me | Plan cycle 2 — addresses adversarial cycle 1 findings. (C1) CF cfProvider injected `zones zoneListerCF` interface field; iterator pattern uses cloudflare-go/v7 AutoPager Next()/Current()/Err() not iter.Seq2. (C2) NC types corrected: `DomainsGetListCommandResponse`, `IsOurDNS *bool`, `Expires *DateTime`, subservice `client.Domains.GetList`, `*int` pointer args. (C3) DO `Links.CurrentPage()` single int return; loop terminates via `IsLastPage()`. (C4) Hover prerequisite git pull added; module-path note clarifies pkg/hoverclient is subpath of parent module (tag parent at v0.4.0); fixed `Domain.Name` field (was `DomainName`). (C5) `--output`/`-o` flag added to import-all; scenarios use it. (I1) interface assertion `interfaces.EnumeratorAll` not `Enumerator`. (I2) `infraStateStore` (package-private) not `interfaces.IaCStateStore`. (I3) variable `configFile` not `cfgFile`. (I4) Task 24 runtime-launch-validation step added: build wfctl + invoke --help on new commands + verify --required error paths. (I5) PR 4.5 + Task 13.5 added for workflow-registry pin-bump batched per `feedback_version_bump_immediate_merge.md`. (I6) scenario layout normalized to canonical `scenarios/<id>-<name>/{scenario.yaml,config/,test/}` with IDs 89/90/91; stub plugin moved to `scenarios/lib/dns-stub-plugin/`; PASS/FAIL/SKIP counter pattern adopted; scenarios.json registration tasked. Plan now 9 PRs, 33 tasks, 7 repos. |
