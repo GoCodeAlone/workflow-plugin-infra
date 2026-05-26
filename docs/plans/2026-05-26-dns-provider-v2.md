@@ -90,8 +90,21 @@ var _ dnspolicy.Adapter = (*<prov>Adapter)(nil)
 // Self-registration via init (closes plan-cycle-1 C-2 — eliminates adapter.go switch contention).
 func init() { Register("<provider-key>", new<Prov>Adapter) }
 
+// <prov>ProviderIface is the minimum upstream surface the adapter consumes.
+// Defined in production (not test) so adapter's .provider field is interface-typed —
+// tests inject stubs and exercise real adapter methods (closes plan-cycle-3 C3-2).
+// Sanity: libdns<prov>.Provider satisfies this iface (compile-checked below).
+type <prov>ProviderIface interface {
+    GetRecords(context.Context, string) ([]libdns.Record, error)
+    SetRecords(context.Context, string, []libdns.Record) ([]libdns.Record, error)
+    AppendRecords(context.Context, string, []libdns.Record) ([]libdns.Record, error)
+    DeleteRecords(context.Context, string, []libdns.Record) ([]libdns.Record, error)
+}
+
+var _ <prov>ProviderIface = (*libdns<prov>.Provider)(nil)
+
 type <prov>Adapter struct {
-    provider *libdns<prov>.Provider
+    provider <prov>ProviderIface  // iface-typed for test injection (cycle-3 C3-2)
 }
 
 func new<Prov>Adapter(creds map[string]string) (dnspolicy.Adapter, error) {
@@ -101,39 +114,34 @@ func new<Prov>Adapter(creds map[string]string) (dnspolicy.Adapter, error) {
 }
 
 // Interface impls — GetTXT/UpsertTXT/UpsertRecord/DeleteRecord — match v1 doAdapter shape.
+// Call a.provider.<Method>(...) — concrete in prod, stub in tests.
 ```
 
 ### Test pattern (canonical: `digitalocean_test.go` lines 1-77)
 
 ```go
-// Per-provider stub iface that the libdns Provider satisfies.
-type <prov>ProviderIface interface {
-    GetRecords(context.Context, string) ([]libdns.Record, error)
-    SetRecords(context.Context, string, []libdns.Record) ([]libdns.Record, error)
-    AppendRecords(context.Context, string, []libdns.Record) ([]libdns.Record, error)
-    DeleteRecords(context.Context, string, []libdns.Record) ([]libdns.Record, error)
-}
+// <prov>ProviderIface is defined in production file (see Adapter shape above).
+// Tests import "time" for libdns.RR TTL conversion.
 
 type stub<Prov>Provider struct {
-    existing  []libdns.Record
-    setCalls  [][]libdns.Record
-    getCalls  int
+    existing []libdns.Record
+    setCalls [][]libdns.Record
+    getCalls int
 }
-// (impl iface methods; record calls; libdns.Provider satisfies same iface.)
+// Impl iface methods (Get/Set/Append/Delete Records); record calls.
 
-// Sanity assertion: libdns Provider satisfies our stub iface.
-var _ <prov>ProviderIface = (*libdns<prov>.Provider)(nil)
-
-// Round-trip helper: mirrors adapter's UpsertTXT but accepts the stub iface.
-func upsertTXTViaProvider<Prov>(ctx context.Context, p <prov>ProviderIface, zone, relName string, values []string, ttl int) error {
-    recs := make([]libdns.Record, len(values))
-    for i, v := range values {
-        recs[i] = libdns.RR{Type: "TXT", Name: relName, Data: v, TTL: time.Duration(ttl) * time.Second}
+func TestX_UpsertTXT_ExercisesAdapter(t *testing.T) {
+    stub := &stub<Prov>Provider{}
+    a := &<prov>Adapter{provider: stub}  // inject stub directly — no helper indirection
+    if err := a.UpsertTXT(ctx, "_workflow-dns-policy.example.com", []string{"v=wfinfra-v1 o=sre"}, 300); err != nil {
+        t.Fatalf("upsert: %v", err)
     }
-    _, err := p.SetRecords(ctx, zone, recs)
-    return err
+    if len(stub.setCalls) != 1 { t.Errorf("SetRecords calls: %d, want 1", len(stub.setCalls)) }
+    // Optional: assert payload shape (type=TXT, name=relName, data=values[0]).
 }
 ```
+
+Critical change vs cycle 2/3: tests construct `&<prov>Adapter{provider: stub}` and call `a.UpsertTXT(...)` — the REAL adapter method runs against the stub, exercising zone-derivation, name-derivation, TTL conversion, error wrapping. Cycle-3 helper-in-test approach (test calls helper that mirrors adapter algorithm) is DEAD — replaced by direct adapter exercise.
 
 ### Cred-validation pattern
 
@@ -276,6 +284,9 @@ func TestNewAdapter_RegistryIsSorted(t *testing.T) {
     // supportedList sorts keys for deterministic error messages.
     list := supportedList()
     parts := strings.Split(list, ", ")
+    if len(parts) < 2 {
+        t.Fatalf("registry empty or single-entry (sort test is meaningless): %v", parts)
+    }
     for i := 1; i < len(parts); i++ {
         if parts[i-1] >= parts[i] {
             t.Errorf("supported list not sorted: %v", parts)
@@ -295,7 +306,6 @@ import (
     "strings"
     "testing"
 
-    libdnsr53 "github.com/libdns/route53"
     "github.com/libdns/libdns"
 )
 
@@ -317,20 +327,22 @@ func TestNewRoute53Adapter_OnlyRegionRequiredAtConstruction(t *testing.T) {
 }
 
 func TestNewRoute53Adapter_MapsFieldsExact(t *testing.T) {
+    // After cycle-4 refactor, a.provider is r53ProviderIface; type-assert to *libdnsr53.Provider for field inspection.
     a, err := newRoute53Adapter(map[string]string{
         "region": "us-east-1", "access_key_id": "AKIA",
         "secret_access_key": "secret", "session_token": "tok", "profile": "p",
     })
     if err != nil { t.Fatalf("construct: %v", err) }
-    r := a.(*route53Adapter)
-    checks := map[string]string{
-        "Region": r.provider.Region, "AccessKeyId": r.provider.AccessKeyId,
-        "SecretAccessKey": r.provider.SecretAccessKey, "SessionToken": r.provider.SessionToken,
-        "Profile": r.provider.Profile,
+    ra := a.(*route53Adapter)
+    p, ok := ra.provider.(*libdnsr53.Provider)
+    if !ok { t.Fatalf("provider field is not *libdnsr53.Provider: %T", ra.provider) }
+    want := map[string]string{
+        "Region": p.Region, "AccessKeyId": p.AccessKeyId,
+        "SecretAccessKey": p.SecretAccessKey, "SessionToken": p.SessionToken, "Profile": p.Profile,
     }
-    want := map[string]string{"Region": "us-east-1", "AccessKeyId": "AKIA", "SecretAccessKey": "secret", "SessionToken": "tok", "Profile": "p"}
-    for k, v := range want {
-        if checks[k] != v { t.Errorf("%s: got %q want %q", k, checks[k], v) }
+    expect := map[string]string{"Region": "us-east-1", "AccessKeyId": "AKIA", "SecretAccessKey": "secret", "SessionToken": "tok", "Profile": "p"}
+    for k, v := range expect {
+        if want[k] != v { t.Errorf("%s: got %q want %q", k, want[k], v) }
     }
 }
 
@@ -341,23 +353,12 @@ func TestNewAdapter_Route53Dispatch(t *testing.T) {
     if err != nil || a2 == nil { t.Fatalf("case-fold Route53: %v / nil=%v", err, a2 == nil) }
 }
 
-// Stub iface + round-trip test (locks the libdns boundary semantics per Important I-1).
-type r53ProviderIface interface {
-    GetRecords(context.Context, string) ([]libdns.Record, error)
-    SetRecords(context.Context, string, []libdns.Record) ([]libdns.Record, error)
-    DeleteRecords(context.Context, string, []libdns.Record) ([]libdns.Record, error)
-    AppendRecords(context.Context, string, []libdns.Record) ([]libdns.Record, error)
-}
-
-// Sanity: libdns Provider satisfies our stub iface (catches upstream API churn).
-var _ r53ProviderIface = (*libdnsr53.Provider)(nil)
-
+// Stub satisfies r53ProviderIface (defined in route53.go production file).
 type stubR53Provider struct {
     existing []libdns.Record
     setCalls [][]libdns.Record
     delCalls [][]libdns.Record
 }
-
 func (s *stubR53Provider) GetRecords(_ context.Context, _ string) ([]libdns.Record, error) { return s.existing, nil }
 func (s *stubR53Provider) SetRecords(_ context.Context, _ string, r []libdns.Record) ([]libdns.Record, error) {
     s.setCalls = append(s.setCalls, r); return r, nil
@@ -369,29 +370,33 @@ func (s *stubR53Provider) AppendRecords(_ context.Context, _ string, r []libdns.
     return r, nil
 }
 
-// upsertTXTViaR53 mirrors route53Adapter.UpsertTXT's algorithm for stub injection.
-// Helper lives in _test.go (not production) — production calls SetRecords directly.
-// Boundary lock is provided by the `var _ r53ProviderIface = (*libdnsr53.Provider)(nil)`
-// compile assertion above; this helper documents the algorithm shape.
-func upsertTXTViaR53(ctx context.Context, p r53ProviderIface, zone, relName string, values []string, ttl int) error {
-    recs := make([]libdns.Record, len(values))
-    for i, v := range values {
-        recs[i] = libdns.RR{Type: "TXT", Name: relName, Data: v, TTL: time.Duration(ttl) * time.Second}
+// Exercises the REAL adapter method (not a helper). zone-derivation, name-derivation,
+// TTL conversion, error wrapping all execute against the stub.
+func TestRoute53Adapter_UpsertTXT_ExercisesAdapter(t *testing.T) {
+    stub := &stubR53Provider{}
+    a := &route53Adapter{provider: stub}
+    err := a.UpsertTXT(context.Background(), "_workflow-dns-policy.example.com", []string{"v=wfinfra-v1 o=sre"}, 300)
+    if err != nil { t.Fatalf("upsert: %v", err) }
+    if len(stub.setCalls) != 1 { t.Fatalf("SetRecords calls: %d, want 1", len(stub.setCalls)) }
+    if len(stub.setCalls[0]) != 1 {
+        t.Fatalf("payload len: %d, want 1", len(stub.setCalls[0]))
     }
-    _, err := p.SetRecords(ctx, zone, recs)
-    return err
+    rr := stub.setCalls[0][0].RR()
+    if rr.Type != "TXT" || rr.Data != "v=wfinfra-v1 o=sre" {
+        t.Errorf("payload wrong: type=%s data=%s", rr.Type, rr.Data)
+    }
 }
 
-func TestRoute53UpsertTXTAlgorithmShape(t *testing.T) {
-    // Locks the algorithm shape that route53Adapter.UpsertTXT implements:
-    // one SetRecords call with TXT records matching the requested values.
-    // Production code path is verified by the compile-time `var _` assertion.
+// Closes plan-cycle-3 I3-6: priority dropped for non-MX/SRV; no error.
+func TestRoute53Adapter_UpsertRecord_PriorityDroppedForA(t *testing.T) {
     stub := &stubR53Provider{}
-    err := upsertTXTViaR53(context.Background(), stub, "example.com", "_workflow-dns-policy", []string{"v=wfinfra-v1 o=sre"}, 300)
+    a := &route53Adapter{provider: stub}
+    _, err := a.UpsertRecord(context.Background(), "example.com", "host", "A", "1.2.3.4", 300, 10)
     if err != nil { t.Fatalf("upsert: %v", err) }
-    if len(stub.setCalls) != 1 { t.Errorf("SetRecords calls: %d, want 1", len(stub.setCalls)) }
-    if len(stub.setCalls[0]) != 1 || stub.setCalls[0][0].RR().Type != "TXT" || stub.setCalls[0][0].RR().Data != "v=wfinfra-v1 o=sre" {
-        t.Errorf("SetRecords payload wrong: %+v", stub.setCalls[0])
+    if len(stub.setCalls) != 1 || len(stub.setCalls[0]) != 1 { t.Fatalf("calls: %+v", stub.setCalls) }
+    rr := stub.setCalls[0][0].RR()
+    if rr.Type != "A" || rr.Data != "1.2.3.4" {
+        t.Errorf("payload: type=%s data=%s", rr.Type, rr.Data)
     }
 }
 ```
@@ -425,8 +430,18 @@ var _ dnspolicy.Adapter = (*route53Adapter)(nil)
 
 func init() { Register("route53", newRoute53Adapter) }
 
+// r53ProviderIface is the minimum upstream surface route53Adapter consumes.
+// Production holds *libdnsr53.Provider; tests inject stubs (closes cycle-3 C3-2).
+type r53ProviderIface interface {
+    GetRecords(context.Context, string) ([]libdns.Record, error)
+    SetRecords(context.Context, string, []libdns.Record) ([]libdns.Record, error)
+    DeleteRecords(context.Context, string, []libdns.Record) ([]libdns.Record, error)
+    AppendRecords(context.Context, string, []libdns.Record) ([]libdns.Record, error)
+}
+var _ r53ProviderIface = (*libdnsr53.Provider)(nil)
+
 type route53Adapter struct {
-    provider *libdnsr53.Provider
+    provider r53ProviderIface
 }
 
 func newRoute53Adapter(creds map[string]string) (dnspolicy.Adapter, error) {
@@ -573,7 +588,16 @@ git add internal/dnsprovider/adapter.go internal/dnsprovider/registry_test.go \
         internal/dnsprovider/route53.go internal/dnsprovider/route53_test.go \
         docs/providers/README.md docs/providers/route53.md \
         go.mod go.sum
-git commit -m "feat(dnsprovider): add registry-map + Route53 adapter + docs index"
+git commit -m "$(cat <<'EOF'
+feat(dnsprovider): add registry-map + Route53 adapter + docs index
+
+- Refactor adapter.go switch to init()-based registry-map.
+- Re-register v1 digitalocean+cloudflare via init() Register calls.
+- Add Route53 adapter (libdns/route53 v1.6.2) with iface-typed
+  .provider field for test injection.
+- Add docs/providers/{README.md,route53.md} skeleton.
+EOF
+)"
 ```
 
 ---
@@ -616,7 +640,6 @@ func TestNewGCPAdapter_RequiresProject(t *testing.T) {
 }
 
 func TestNewGCPAdapter_OnlyProjectRequiredAtConstruction(t *testing.T) {
-    // Adapter accepts project-only creds; libdns resolves ADC at first API call.
     a, err := newGoogleCloudDNSAdapter(map[string]string{"gcp_project": "proj-x"})
     if err != nil { t.Fatalf("project-only construction rejected: %v", err) }
     if a == nil { t.Fatal("nil adapter") }
@@ -627,10 +650,12 @@ func TestNewGCPAdapter_MapsFieldsExact(t *testing.T) {
         "gcp_project": "proj-x", "service_account_path": "/etc/secrets/sa.json",
     })
     if err != nil { t.Fatalf("construct: %v", err) }
-    g := a.(*gcpAdapter)
-    if g.provider.Project != "proj-x" { t.Errorf("Project: %q", g.provider.Project) }
-    if g.provider.ServiceAccountJSON != "/etc/secrets/sa.json" {
-        t.Errorf("ServiceAccountJSON: %q", g.provider.ServiceAccountJSON)
+    ga := a.(*gcpAdapter)
+    p, ok := ga.provider.(*libdnsgcp.Provider)
+    if !ok { t.Fatalf("provider field is not *libdnsgcp.Provider: %T", ga.provider) }
+    if p.Project != "proj-x" { t.Errorf("Project: %q", p.Project) }
+    if p.ServiceAccountJSON != "/etc/secrets/sa.json" {
+        t.Errorf("ServiceAccountJSON: %q", p.ServiceAccountJSON)
     }
 }
 
@@ -639,18 +664,8 @@ func TestNewAdapter_GCPDispatch(t *testing.T) {
     if err != nil || a == nil { t.Fatalf("dispatch gcp: %v / nil=%v", err, a == nil) }
 }
 
-// Stub iface + round-trip — locks libdns boundary per I-1.
-type gcpProviderIface interface {
-    GetRecords(context.Context, string) ([]libdns.Record, error)
-    SetRecords(context.Context, string, []libdns.Record) ([]libdns.Record, error)
-    DeleteRecords(context.Context, string, []libdns.Record) ([]libdns.Record, error)
-    AppendRecords(context.Context, string, []libdns.Record) ([]libdns.Record, error)
-}
-var _ gcpProviderIface = (*libdnsgcp.Provider)(nil)
-
-type stubGCPProvider struct {
-    setCalls [][]libdns.Record
-}
+// Stub satisfies gcpProviderIface (defined in googleclouddns.go production file).
+type stubGCPProvider struct{ setCalls [][]libdns.Record }
 func (s *stubGCPProvider) GetRecords(_ context.Context, _ string) ([]libdns.Record, error) { return nil, nil }
 func (s *stubGCPProvider) SetRecords(_ context.Context, _ string, r []libdns.Record) ([]libdns.Record, error) {
     s.setCalls = append(s.setCalls, r); return r, nil
@@ -658,22 +673,24 @@ func (s *stubGCPProvider) SetRecords(_ context.Context, _ string, r []libdns.Rec
 func (s *stubGCPProvider) DeleteRecords(_ context.Context, _ string, r []libdns.Record) ([]libdns.Record, error) { return r, nil }
 func (s *stubGCPProvider) AppendRecords(_ context.Context, _ string, r []libdns.Record) ([]libdns.Record, error) { return r, nil }
 
-// Helper mirrors gcpAdapter.UpsertTXT algorithm shape; production calls SetRecords directly.
-func upsertTXTViaGCP(ctx context.Context, p gcpProviderIface, zone, relName string, values []string, ttl int) error {
-    recs := make([]libdns.Record, len(values))
-    for i, v := range values {
-        recs[i] = libdns.RR{Type: "TXT", Name: relName, Data: v, TTL: time.Duration(ttl) * time.Second}
-    }
-    _, err := p.SetRecords(ctx, zone, recs)
-    return err
-}
-
-func TestGCPUpsertTXTAlgorithmShape(t *testing.T) {
+func TestGCPAdapter_UpsertTXT_ExercisesAdapter(t *testing.T) {
     stub := &stubGCPProvider{}
-    if err := upsertTXTViaGCP(context.Background(), stub, "example.com", "_workflow-dns-policy", []string{"v=wfinfra-v1 o=sre"}, 300); err != nil {
+    a := &gcpAdapter{provider: stub}
+    if err := a.UpsertTXT(context.Background(), "_workflow-dns-policy.example.com", []string{"v=wfinfra-v1 o=sre"}, 300); err != nil {
         t.Fatalf("upsert: %v", err)
     }
     if len(stub.setCalls) != 1 { t.Errorf("SetRecords calls: %d, want 1", len(stub.setCalls)) }
+}
+
+func TestGCPAdapter_UpsertRecord_PriorityDroppedForA(t *testing.T) {
+    stub := &stubGCPProvider{}
+    a := &gcpAdapter{provider: stub}
+    if _, err := a.UpsertRecord(context.Background(), "example.com", "host", "A", "1.2.3.4", 300, 10); err != nil {
+        t.Fatalf("upsert: %v", err)
+    }
+    if len(stub.setCalls) != 1 || stub.setCalls[0][0].RR().Type != "A" {
+        t.Errorf("calls: %+v", stub.setCalls)
+    }
 }
 ```
 
@@ -705,8 +722,16 @@ var _ dnspolicy.Adapter = (*gcpAdapter)(nil)
 
 func init() { Register("googleclouddns", newGoogleCloudDNSAdapter) }
 
+type gcpProviderIface interface {
+    GetRecords(context.Context, string) ([]libdns.Record, error)
+    SetRecords(context.Context, string, []libdns.Record) ([]libdns.Record, error)
+    DeleteRecords(context.Context, string, []libdns.Record) ([]libdns.Record, error)
+    AppendRecords(context.Context, string, []libdns.Record) ([]libdns.Record, error)
+}
+var _ gcpProviderIface = (*libdnsgcp.Provider)(nil)
+
 type gcpAdapter struct {
-    provider *libdnsgcp.Provider
+    provider gcpProviderIface
 }
 
 func newGoogleCloudDNSAdapter(creds map[string]string) (dnspolicy.Adapter, error) {
@@ -812,7 +837,9 @@ Same as Task 1 Step 10. Expected: PASS; vet clean; build exit 0.
 **Step 7: Commit**
 
 ```bash
-git checkout -b feat/dns-provider-v2-gcp master  # branch from master, then rebase if PR 1 still pre-merge
+# Branch from master if PR 1 merged; from PR 1's branch otherwise (branch-stacking).
+BASE=$(git rev-parse --verify feat/dns-provider-v2-route53 2>/dev/null || echo master)
+git checkout -b feat/dns-provider-v2-gcp "$BASE"
 git add internal/dnsprovider/googleclouddns.go internal/dnsprovider/googleclouddns_test.go \
         docs/providers/googleclouddns.md go.mod go.sum
 git commit -m "feat(dnsprovider): add GCP Cloud DNS adapter"
@@ -882,8 +909,10 @@ func TestNewAzureAdapter_ServicePrincipalMode(t *testing.T) {
     })
     if err != nil { t.Fatalf("SP mode: %v", err) }
     az := a.(*azureAdapter)
-    if az.provider.TenantId != "t" || az.provider.ClientId != "c" || az.provider.ClientSecret != "s" {
-        t.Errorf("SP fields wrong: %+v", az.provider)
+    p, ok := az.provider.(*libdnsazure.Provider)
+    if !ok { t.Fatalf("provider field is not *libdnsazure.Provider: %T", az.provider) }
+    if p.TenantId != "t" || p.ClientId != "c" || p.ClientSecret != "s" {
+        t.Errorf("SP fields wrong: %+v", p)
     }
 }
 
@@ -902,15 +931,7 @@ func TestNewAdapter_AzureDispatch(t *testing.T) {
     if err != nil || a == nil { t.Fatalf("dispatch azure: %v / nil=%v", err, a == nil) }
 }
 
-// Stub round-trip per I-1.
-type azProviderIface interface {
-    GetRecords(context.Context, string) ([]libdns.Record, error)
-    SetRecords(context.Context, string, []libdns.Record) ([]libdns.Record, error)
-    DeleteRecords(context.Context, string, []libdns.Record) ([]libdns.Record, error)
-    AppendRecords(context.Context, string, []libdns.Record) ([]libdns.Record, error)
-}
-var _ azProviderIface = (*libdnsazure.Provider)(nil)
-
+// Stub satisfies azProviderIface (defined in azure.go production file).
 type stubAzProvider struct{ setCalls [][]libdns.Record }
 func (s *stubAzProvider) GetRecords(_ context.Context, _ string) ([]libdns.Record, error) { return nil, nil }
 func (s *stubAzProvider) SetRecords(_ context.Context, _ string, r []libdns.Record) ([]libdns.Record, error) {
@@ -919,22 +940,24 @@ func (s *stubAzProvider) SetRecords(_ context.Context, _ string, r []libdns.Reco
 func (s *stubAzProvider) DeleteRecords(_ context.Context, _ string, r []libdns.Record) ([]libdns.Record, error) { return r, nil }
 func (s *stubAzProvider) AppendRecords(_ context.Context, _ string, r []libdns.Record) ([]libdns.Record, error) { return r, nil }
 
-// Helper mirrors azureAdapter.UpsertTXT algorithm shape; production calls SetRecords directly.
-func upsertTXTViaAzure(ctx context.Context, p azProviderIface, zone, relName string, values []string, ttl int) error {
-    recs := make([]libdns.Record, len(values))
-    for i, v := range values {
-        recs[i] = libdns.RR{Type: "TXT", Name: relName, Data: v, TTL: time.Duration(ttl) * time.Second}
-    }
-    _, err := p.SetRecords(ctx, zone, recs)
-    return err
-}
-
-func TestAzureUpsertTXTAlgorithmShape(t *testing.T) {
+func TestAzureAdapter_UpsertTXT_ExercisesAdapter(t *testing.T) {
     stub := &stubAzProvider{}
-    if err := upsertTXTViaAzure(context.Background(), stub, "example.com", "_workflow-dns-policy", []string{"v=wfinfra-v1 o=sre"}, 300); err != nil {
+    a := &azureAdapter{provider: stub}
+    if err := a.UpsertTXT(context.Background(), "_workflow-dns-policy.example.com", []string{"v=wfinfra-v1 o=sre"}, 300); err != nil {
         t.Fatalf("upsert: %v", err)
     }
     if len(stub.setCalls) != 1 { t.Errorf("SetRecords calls: %d", len(stub.setCalls)) }
+}
+
+func TestAzureAdapter_UpsertRecord_PriorityDroppedForA(t *testing.T) {
+    stub := &stubAzProvider{}
+    a := &azureAdapter{provider: stub}
+    if _, err := a.UpsertRecord(context.Background(), "example.com", "host", "A", "1.2.3.4", 300, 10); err != nil {
+        t.Fatalf("upsert: %v", err)
+    }
+    if len(stub.setCalls) != 1 || stub.setCalls[0][0].RR().Type != "A" {
+        t.Errorf("calls: %+v", stub.setCalls)
+    }
 }
 ```
 
@@ -967,8 +990,16 @@ var _ dnspolicy.Adapter = (*azureAdapter)(nil)
 
 func init() { Register("azuredns", newAzureAdapter) }
 
+type azProviderIface interface {
+    GetRecords(context.Context, string) ([]libdns.Record, error)
+    SetRecords(context.Context, string, []libdns.Record) ([]libdns.Record, error)
+    DeleteRecords(context.Context, string, []libdns.Record) ([]libdns.Record, error)
+    AppendRecords(context.Context, string, []libdns.Record) ([]libdns.Record, error)
+}
+var _ azProviderIface = (*libdnsazure.Provider)(nil)
+
 type azureAdapter struct {
-    provider *libdnsazure.Provider
+    provider azProviderIface
 }
 
 func newAzureAdapter(creds map[string]string) (dnspolicy.Adapter, error) {
@@ -1104,7 +1135,8 @@ Same as Task 1 Step 10.
 **Step 7: Commit**
 
 ```bash
-git checkout -b feat/dns-provider-v2-azure master
+BASE=$(git rev-parse --verify feat/dns-provider-v2-route53 2>/dev/null || echo master)
+git checkout -b feat/dns-provider-v2-azure "$BASE"
 git add internal/dnsprovider/azure.go internal/dnsprovider/azure_test.go \
         docs/providers/azuredns.md go.mod go.sum
 git commit -m "feat(dnsprovider): add Azure DNS adapter"
@@ -1167,9 +1199,11 @@ func TestNewNamecheapAdapter_MapsFieldsExact(t *testing.T) {
     })
     if err != nil { t.Fatalf("construct: %v", err) }
     n := a.(*namecheapAdapter)
-    if n.provider.APIKey != "k" || n.provider.User != "u" || n.provider.ClientIP != "1.2.3.4" ||
-        n.provider.APIEndpoint != "https://api.sandbox.namecheap.com/xml.response" {
-        t.Errorf("fields: %+v", n.provider)
+    p, ok := n.provider.(*libdnsnc.Provider)
+    if !ok { t.Fatalf("provider field is not *libdnsnc.Provider: %T", n.provider) }
+    if p.APIKey != "k" || p.User != "u" || p.ClientIP != "1.2.3.4" ||
+        p.APIEndpoint != "https://api.sandbox.namecheap.com/xml.response" {
+        t.Errorf("fields: %+v", p)
     }
 }
 
@@ -1178,15 +1212,7 @@ func TestNewAdapter_NamecheapDispatch(t *testing.T) {
     if err != nil || a == nil { t.Fatalf("dispatch namecheap: %v / nil=%v", err, a == nil) }
 }
 
-// Stub round-trip per I-1.
-type ncProviderIface interface {
-    GetRecords(context.Context, string) ([]libdns.Record, error)
-    SetRecords(context.Context, string, []libdns.Record) ([]libdns.Record, error)
-    AppendRecords(context.Context, string, []libdns.Record) ([]libdns.Record, error)
-    DeleteRecords(context.Context, string, []libdns.Record) ([]libdns.Record, error)
-}
-var _ ncProviderIface = (*libdnsnc.Provider)(nil)
-
+// Stub satisfies ncProviderIface (defined in namecheap.go production file).
 type stubNCProvider struct{ setCalls [][]libdns.Record }
 func (s *stubNCProvider) GetRecords(_ context.Context, _ string) ([]libdns.Record, error) { return nil, nil }
 func (s *stubNCProvider) SetRecords(_ context.Context, _ string, r []libdns.Record) ([]libdns.Record, error) {
@@ -1195,22 +1221,24 @@ func (s *stubNCProvider) SetRecords(_ context.Context, _ string, r []libdns.Reco
 func (s *stubNCProvider) AppendRecords(_ context.Context, _ string, r []libdns.Record) ([]libdns.Record, error) { return r, nil }
 func (s *stubNCProvider) DeleteRecords(_ context.Context, _ string, r []libdns.Record) ([]libdns.Record, error) { return r, nil }
 
-// Helper mirrors namecheapAdapter.UpsertTXT algorithm shape; production calls SetRecords directly.
-func upsertTXTViaNC(ctx context.Context, p ncProviderIface, zone, relName string, values []string, ttl int) error {
-    recs := make([]libdns.Record, len(values))
-    for i, v := range values {
-        recs[i] = libdns.RR{Type: "TXT", Name: relName, Data: v, TTL: time.Duration(ttl) * time.Second}
-    }
-    _, err := p.SetRecords(ctx, zone, recs)
-    return err
-}
-
-func TestNamecheapUpsertTXTAlgorithmShape(t *testing.T) {
+func TestNamecheapAdapter_UpsertTXT_ExercisesAdapter(t *testing.T) {
     stub := &stubNCProvider{}
-    if err := upsertTXTViaNC(context.Background(), stub, "example.com", "_workflow-dns-policy", []string{"v=wfinfra-v1 o=sre"}, 300); err != nil {
+    a := &namecheapAdapter{provider: stub}
+    if err := a.UpsertTXT(context.Background(), "_workflow-dns-policy.example.com", []string{"v=wfinfra-v1 o=sre"}, 300); err != nil {
         t.Fatalf("upsert: %v", err)
     }
     if len(stub.setCalls) != 1 { t.Errorf("SetRecords calls: %d, want 1", len(stub.setCalls)) }
+}
+
+func TestNamecheapAdapter_UpsertRecord_PriorityDroppedForA(t *testing.T) {
+    stub := &stubNCProvider{}
+    a := &namecheapAdapter{provider: stub}
+    if _, err := a.UpsertRecord(context.Background(), "example.com", "host", "A", "1.2.3.4", 300, 10); err != nil {
+        t.Fatalf("upsert: %v", err)
+    }
+    if len(stub.setCalls) != 1 || stub.setCalls[0][0].RR().Type != "A" {
+        t.Errorf("calls: %+v", stub.setCalls)
+    }
 }
 ```
 
@@ -1242,8 +1270,16 @@ var _ dnspolicy.Adapter = (*namecheapAdapter)(nil)
 
 func init() { Register("namecheap", newNamecheapAdapter) }
 
+type ncProviderIface interface {
+    GetRecords(context.Context, string) ([]libdns.Record, error)
+    SetRecords(context.Context, string, []libdns.Record) ([]libdns.Record, error)
+    AppendRecords(context.Context, string, []libdns.Record) ([]libdns.Record, error)
+    DeleteRecords(context.Context, string, []libdns.Record) ([]libdns.Record, error)
+}
+var _ ncProviderIface = (*libdnsnc.Provider)(nil)
+
 type namecheapAdapter struct {
-    provider *libdnsnc.Provider
+    provider ncProviderIface
 }
 
 func newNamecheapAdapter(creds map[string]string) (dnspolicy.Adapter, error) {
@@ -1345,7 +1381,8 @@ Same as Task 1 Step 10.
 **Step 7: Commit**
 
 ```bash
-git checkout -b feat/dns-provider-v2-namecheap master
+BASE=$(git rev-parse --verify feat/dns-provider-v2-route53 2>/dev/null || echo master)
+git checkout -b feat/dns-provider-v2-namecheap "$BASE"
 git add internal/dnsprovider/namecheap.go internal/dnsprovider/namecheap_test.go \
         docs/providers/namecheap.md go.mod go.sum
 git commit -m "feat(dnsprovider): add Namecheap adapter"
@@ -1388,10 +1425,19 @@ func TestNewGoDaddyAdapter_RequiresToken(t *testing.T) {
     }
 }
 
-func TestNewGoDaddyAdapter_RequiresColonFormat(t *testing.T) {
-    _, err := newGoDaddyAdapter(map[string]string{"api_token": "bare-sso-key-no-colon"})
-    if err == nil || !strings.Contains(err.Error(), "<sso-key>:<sso-secret>") {
-        t.Errorf("want colon-format rejection, got %v", err)
+func TestNewGoDaddyAdapter_RequiresColonFormatAndBothParts(t *testing.T) {
+    // Closes cycle-3 I3-5: strengthen validation beyond colon-presence.
+    cases := []struct{ in, want string }{
+        {"bare-sso-key-no-colon", "<sso-key>:<sso-secret>"},
+        {":", "<sso-key>:<sso-secret>"},
+        {":foo", "<sso-key>:<sso-secret>"},
+        {"foo:", "<sso-key>:<sso-secret>"},
+    }
+    for _, tc := range cases {
+        _, err := newGoDaddyAdapter(map[string]string{"api_token": tc.in})
+        if err == nil || !strings.Contains(err.Error(), tc.want) {
+            t.Errorf("token=%q want %q in error, got %v", tc.in, tc.want, err)
+        }
     }
 }
 
@@ -1399,7 +1445,9 @@ func TestNewGoDaddyAdapter_AcceptsConcatenatedToken(t *testing.T) {
     a, err := newGoDaddyAdapter(map[string]string{"api_token": "ssokey:ssosecret"})
     if err != nil { t.Fatalf("construct: %v", err) }
     g := a.(*godaddyAdapter)
-    if g.provider.APIToken != "ssokey:ssosecret" { t.Errorf("APIToken: %q", g.provider.APIToken) }
+    p, ok := g.provider.(*libdnsgd.Provider)
+    if !ok { t.Fatalf("provider field is not *libdnsgd.Provider: %T", g.provider) }
+    if p.APIToken != "ssokey:ssosecret" { t.Errorf("APIToken: %q", p.APIToken) }
 }
 
 func TestNewAdapter_GoDaddyDispatch(t *testing.T) {
@@ -1407,15 +1455,7 @@ func TestNewAdapter_GoDaddyDispatch(t *testing.T) {
     if err != nil || a == nil { t.Fatalf("dispatch godaddy: %v / nil=%v", err, a == nil) }
 }
 
-// Stub round-trip per I-1.
-type gdProviderIface interface {
-    GetRecords(context.Context, string) ([]libdns.Record, error)
-    SetRecords(context.Context, string, []libdns.Record) ([]libdns.Record, error)
-    AppendRecords(context.Context, string, []libdns.Record) ([]libdns.Record, error)
-    DeleteRecords(context.Context, string, []libdns.Record) ([]libdns.Record, error)
-}
-var _ gdProviderIface = (*libdnsgd.Provider)(nil)
-
+// Stub satisfies gdProviderIface (defined in godaddy.go production file).
 type stubGDProvider struct{ setCalls [][]libdns.Record }
 func (s *stubGDProvider) GetRecords(_ context.Context, _ string) ([]libdns.Record, error) { return nil, nil }
 func (s *stubGDProvider) SetRecords(_ context.Context, _ string, r []libdns.Record) ([]libdns.Record, error) {
@@ -1424,22 +1464,24 @@ func (s *stubGDProvider) SetRecords(_ context.Context, _ string, r []libdns.Reco
 func (s *stubGDProvider) AppendRecords(_ context.Context, _ string, r []libdns.Record) ([]libdns.Record, error) { return r, nil }
 func (s *stubGDProvider) DeleteRecords(_ context.Context, _ string, r []libdns.Record) ([]libdns.Record, error) { return r, nil }
 
-// Helper mirrors godaddyAdapter.UpsertTXT algorithm shape; production calls SetRecords directly.
-func upsertTXTViaGD(ctx context.Context, p gdProviderIface, zone, relName string, values []string, ttl int) error {
-    recs := make([]libdns.Record, len(values))
-    for i, v := range values {
-        recs[i] = libdns.RR{Type: "TXT", Name: relName, Data: v, TTL: time.Duration(ttl) * time.Second}
-    }
-    _, err := p.SetRecords(ctx, zone, recs)
-    return err
-}
-
-func TestGoDaddyUpsertTXTAlgorithmShape(t *testing.T) {
+func TestGoDaddyAdapter_UpsertTXT_ExercisesAdapter(t *testing.T) {
     stub := &stubGDProvider{}
-    if err := upsertTXTViaGD(context.Background(), stub, "example.com", "_workflow-dns-policy", []string{"v=wfinfra-v1 o=sre"}, 300); err != nil {
+    a := &godaddyAdapter{provider: stub}
+    if err := a.UpsertTXT(context.Background(), "_workflow-dns-policy.example.com", []string{"v=wfinfra-v1 o=sre"}, 300); err != nil {
         t.Fatalf("upsert: %v", err)
     }
     if len(stub.setCalls) != 1 { t.Errorf("SetRecords calls: %d, want 1", len(stub.setCalls)) }
+}
+
+func TestGoDaddyAdapter_UpsertRecord_PriorityDroppedForA(t *testing.T) {
+    stub := &stubGDProvider{}
+    a := &godaddyAdapter{provider: stub}
+    if _, err := a.UpsertRecord(context.Background(), "example.com", "host", "A", "1.2.3.4", 300, 10); err != nil {
+        t.Fatalf("upsert: %v", err)
+    }
+    if len(stub.setCalls) != 1 || stub.setCalls[0][0].RR().Type != "A" {
+        t.Errorf("calls: %+v", stub.setCalls)
+    }
 }
 ```
 
@@ -1472,8 +1514,16 @@ var _ dnspolicy.Adapter = (*godaddyAdapter)(nil)
 
 func init() { Register("godaddy", newGoDaddyAdapter) }
 
+type gdProviderIface interface {
+    GetRecords(context.Context, string) ([]libdns.Record, error)
+    SetRecords(context.Context, string, []libdns.Record) ([]libdns.Record, error)
+    AppendRecords(context.Context, string, []libdns.Record) ([]libdns.Record, error)
+    DeleteRecords(context.Context, string, []libdns.Record) ([]libdns.Record, error)
+}
+var _ gdProviderIface = (*libdnsgd.Provider)(nil)
+
 type godaddyAdapter struct {
-    provider *libdnsgd.Provider
+    provider gdProviderIface
 }
 
 func newGoDaddyAdapter(creds map[string]string) (dnspolicy.Adapter, error) {
@@ -1482,8 +1532,10 @@ func newGoDaddyAdapter(creds map[string]string) (dnspolicy.Adapter, error) {
     if token == "" {
         return nil, fmt.Errorf("godaddy: missing creds.api_token (format: \"<sso-key>:<sso-secret>\"; see docs/providers/godaddy.md)")
     }
-    if !strings.Contains(token, ":") {
-        return nil, fmt.Errorf("godaddy: creds.api_token must be \"<sso-key>:<sso-secret>\" (concatenated with ':'); see docs/providers/godaddy.md")
+    // Closes cycle-3 I3-5: strict split + both parts non-empty.
+    parts := strings.SplitN(token, ":", 2)
+    if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+        return nil, fmt.Errorf("godaddy: creds.api_token must be \"<sso-key>:<sso-secret>\" (both parts non-empty); see docs/providers/godaddy.md")
     }
     return &godaddyAdapter{provider: &libdnsgd.Provider{APIToken: token}}, nil
 }
@@ -1574,7 +1626,8 @@ Same as Task 1 Step 10.
 **Step 7: Commit**
 
 ```bash
-git checkout -b feat/dns-provider-v2-godaddy master
+BASE=$(git rev-parse --verify feat/dns-provider-v2-route53 2>/dev/null || echo master)
+git checkout -b feat/dns-provider-v2-godaddy "$BASE"
 git add internal/dnsprovider/godaddy.go internal/dnsprovider/godaddy_test.go \
         docs/providers/godaddy.md go.mod go.sum
 git commit -m "feat(dnsprovider): add GoDaddy adapter"
@@ -1600,15 +1653,28 @@ git commit -m "feat(dnsprovider): add GoDaddy adapter"
 | `password` | yes |
 | `totp_secret` | optional |
 
-**Step 0: Verify pkg/hoverclient public surface (gating)**
+**Step 0: Verify pkg/hoverclient public surface (gating — DO NOT skip)**
 
-Before any code:
+Before any code. Branch creation in Step 6 is GATED on hover#25 tag existence:
+```
+git ls-remote --tags git@github.com:GoCodeAlone/workflow-plugin-hover.git | grep -E 'refs/tags/v0\.[3-9]\.' | head
+```
+If no tag ≥ v0.3.0 exists, STOP — defer Task 6 until hover#25 ships + tags.
+
+When tag exists, verify public surface:
 ```
 GOWORK=off go doc github.com/GoCodeAlone/workflow-plugin-hover/pkg/hoverclient.Client
 GOWORK=off go doc github.com/GoCodeAlone/workflow-plugin-hover/pkg/hoverclient.Config
 GOWORK=off go doc github.com/GoCodeAlone/workflow-plugin-hover/pkg/hoverclient.NewClient
+GOWORK=off go doc github.com/GoCodeAlone/workflow-plugin-hover/pkg/hoverclient.Record
 ```
-Expected: `Config` exposes fields covering `Username`/`Password`/`TOTPSecret` (or equivalent — note actual names). If field names differ from this plan, revise Steps 3+ before proceeding. If methods named differently (e.g. `ListRecords` vs `GetRecords`), revise method names in Step 3.
+Note actual field names + method names. **Skeleton in Step 4 below is TBD-pending-godoc** — all field accesses (`r.ID`, `r.Content`, `r.Name`, `r.Type`, `hoverclient.Config{Username, Password, TOTPSecret}`, `hoverclient.Record{Type, Name, Content, TTL, Priority}`, methods `ListRecords`/`DeleteRecord`/`CreateRecord`) are the design's GUESS and must be reconciled against godoc output. If names differ, revise Step 4 inline BEFORE proceeding.
+
+Additionally verify `NewClient` is a no-I/O constructor:
+```
+GOWORK=off go doc -src github.com/GoCodeAlone/workflow-plugin-hover/pkg/hoverclient.NewClient | head -50
+```
+If `NewClient` performs login/HTTP round-trip on construction (closes cycle-3 I3-4), refactor `newHoverAdapter` to lazy-init the client on first method call OR accept a `hoverclient.Doer` iface stub for test injection.
 
 **Step 1: Write failing tests (hover_test.go)**
 
@@ -1658,9 +1724,9 @@ Expected: FAIL.
 Run: `GOWORK=off go get github.com/GoCodeAlone/workflow-plugin-hover/pkg/hoverclient@<tag-from-hover#25>`
 (Replace `<tag-from-hover#25>` with actual tag — e.g. `v0.3.0`.)
 
-**Step 4: Implement hover.go**
+**Step 4: Implement hover.go (skeleton — TBD pending Step 0 godoc reconciliation)**
 
-Exact `pkg/hoverclient.Client`/`Config`/method shape resolved at hover#25 tag via Step 0 godoc. Skeleton:
+⚠ Every field/method name below is a GUESS. Reconcile against Step 0 godoc output before committing. Likely-divergent names listed in comments.
 
 ```go
 package dnsprovider
@@ -1798,7 +1864,8 @@ Same as Task 1 Step 10.
 **Step 7: Commit**
 
 ```bash
-git checkout -b feat/dns-provider-v2-hover master
+BASE=$(git rev-parse --verify feat/dns-provider-v2-route53 2>/dev/null || echo master)
+git checkout -b feat/dns-provider-v2-hover "$BASE"
 git add internal/dnsprovider/hover.go internal/dnsprovider/hover_test.go \
         docs/providers/hover.md go.mod go.sum
 git commit -m "feat(dnsprovider): add Hover adapter (post hover#25 pkg/hoverclient)"
