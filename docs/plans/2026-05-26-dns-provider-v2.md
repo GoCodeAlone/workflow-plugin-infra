@@ -42,7 +42,7 @@
 | 5 | feat(dnsprovider): GoDaddy adapter | Task 5 | feat/dns-provider-v2-godaddy |
 | 6 | feat(dnsprovider): Hover adapter | Task 6 | feat/dns-provider-v2-hover |
 
-**Status:** Draft
+**Status:** Locked 2026-05-26T06:34:58Z
 
 **Sequencing**: PR 1 is **blocking** (introduces the `Register` registry function PRs 2-6 depend on). After PR 1 merges and local master fast-forwards, PRs 2-6 each add ONE provider file + ONE docs file. Zero conflicts on `adapter.go`. Only conflict surface is `go.mod`/`go.sum` (additive only; `go mod tidy` after rebase resolves). PRs 2-6 are parallelizable AMONG THEMSELVES post-PR-1-merge. PRs 2-6 must NOT be opened against `master` before PR 1 merges (build would fail: undefined `Register`). If parallel-open is desired pre-PR-1-merge, branch-stack: PR 2 branches from `feat/dns-provider-v2-route53`, PR 3 from same or from PR 2, etc.
 
