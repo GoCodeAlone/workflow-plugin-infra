@@ -1,0 +1,1806 @@
+# DNS import + provider decoupling Implementation Plan
+
+> **For the implementing agent:** REQUIRED SUB-SKILL: Use autodev:executing-plans to implement this plan task-by-task.
+
+**Goal:** Ship cross-provider DNS state import via the engine-native `wfctl infra import` path (4 provider plugin EnumerateAll PRs + 1 bulk-import wrapper), relocate DNS policy code out of workflow-plugin-infra into wfctl (2 PRs), and add cross-provider DNS orchestration scenarios (1 PR). 8 PRs across 6 repos.
+
+**Architecture:** Engine-native via strict-contract `IaCProvider.Import` + `IaCProviderEnumerator.EnumerateAll` (`workflow/plugin/external/proto/iac.proto`). No new gRPC contract. No peer-dispatch SDK extension. Policy code moves to wfctl where it has direct provider-driver access; workflow-plugin-infra strips libdns/* deps + the `infra.dns_record` step (deprecated due to step-handler peer-dispatch impossibility per cycle-3 adversarial I-NEW-1).
+
+**Tech Stack:** Go 1.23+; workflow SDK (`workflow/plugin/external/sdk`); per-provider native SDKs (godo, cloudflare-go/v7, go-namecheap-sdk, pkg/hoverclient); `workflow/iac/wfctlhelpers/ApplyPlanHooks`; `workflow/cmd/wfctl/`.
+
+**Base branch:** main (each repo's primary branch)
+
+**Design:** `docs/plans/2026-05-26-dns-provider-contract-design.md`
+
+---
+
+## Scope Manifest
+
+**PR Count:** 8
+**Tasks:** 32
+**Estimated Lines of Change:** ~3500 (informational; not enforced)
+
+**Out of scope:**
+- aws/azure/gcp/godaddy/route53 EnumerateAll implementations (follow-up plans per provider; same pattern as PR 1-4).
+- Workflow SDK extensions for peer-plugin dispatch (`InvokeService` on `EngineCallbackService`, `AdditionalServices` hook on `IaCServeOptions`). The design uses engine-native primitives that do not need them.
+- Cryptographic plugin-identity attestation (workflow-plugin-supply-chain owns).
+- gocodealone-dns catalog refresh (Phase 5 — separate design in gocodealone-dns repo; deferred per user direction).
+- New gRPC contract for DNS provider operations. Existing strict contract suffices.
+- Per-record-mutation step type replacement. `infra.dns_record` step deprecated; per-record workflows route through `wfctl infra apply` or `wfctl dns-policy *`. A future per-step DNS surface (if needed) is a separate design.
+
+**PR Grouping:**
+
+| PR # | Title | Tasks | Branch |
+|------|-------|-------|--------|
+| 1 | feat(do): EnumerateAll for infra.dns | Task 1, Task 2, Task 3 | `feat/dns-enumerate-all` (workflow-plugin-digitalocean) |
+| 2 | feat(cf): EnumerateAll for infra.dns | Task 4, Task 5, Task 6 | `feat/dns-enumerate-all` (workflow-plugin-cloudflare) |
+| 3 | feat(nc): EnumerateAll for infra.dns | Task 7, Task 8, Task 9 | `feat/dns-enumerate-all` (workflow-plugin-namecheap) |
+| 4 | feat(hover): ListDomains + EnumerateAll for infra.dns | Task 10, Task 11, Task 12, Task 13 | `feat/dns-enumerate-all` (workflow-plugin-hover) |
+| 5 | feat(wfctl): infra import-all bulk wrapper | Task 14, Task 15, Task 16, Task 17 | `feat/wfctl-infra-import-all` (workflow) |
+| 6 | feat(wfctl): relocate dns policy/gate/audit + dns-policy commands + OnBeforeAction hook | Task 18, Task 19, Task 20, Task 21, Task 22, Task 23, Task 24 | `feat/wfctl-dns-policy` (workflow) |
+| 7 | refactor(infra): strip libdns + admincli + dns packages + remove dns_record step | Task 25, Task 26, Task 27, Task 28 | `refactor/strip-dns-libdns` (workflow-plugin-infra) |
+| 8 | feat(scenarios): DNS orchestration tests + stub provider plugin harness | Task 29, Task 30, Task 31, Task 32 | `feat/dns-orchestration` (workflow-scenarios) |
+
+**Dependencies:**
+- PRs 1, 2, 3, 4 parallel (no inter-dep).
+- PR 5 needs ≥1 of PRs 1-4 merged (for its e2e smoke against a real provider). Recommend after all 4 land.
+- PR 6 needs PRs 1-4 merged (its tests exercise EnumerateAll-backed driver paths).
+- PR 7 needs PR 6 merged (relocates pkg destinations must exist first).
+- PR 8 needs PRs 1-5 merged (scenarios consume import-all + EnumerateAll). PR 8's stub-plugin work can begin in parallel; full scenario suite blocks until merge.
+
+**Status:** Draft
+
+---
+
+## Global Design Guidance Mapping
+
+| Guidance | Plan response |
+|---|---|
+| wfctl is user-facing CLI; cross-cutting orchestrators → wfctl builtin | PR 5 + PR 6 add wfctl builtins; PR 7 strips plugin cliCommand |
+| Strict contracts; no structpb/Any | Reuses existing `IaCProviderEnumerator.EnumerateAll` + `IaCProvider.Import` strict contracts |
+| libdns/cloud-sdks isolated in `internal/<provider>/` | PR 7 drops libdns from workflow-plugin-infra; remaining libdns lives in each provider plugin's `internal/drivers/` |
+| Cross-driver parity (≥2 drivers) | 4 drivers in PR 1-4; Phase 4 scenarios validate parity |
+| No mock-first development | PR 8 builds real stub IaCProvider gRPC plugin (not HTTP mock) + live-cred env-gated tests in PR 1-4 |
+| Secrets never logged | PR 6 drops `--token` flag from admincli; creds source from infra config file (one location) |
+| Audit trail for state-mutating ops | PR 6 relocates JSONL trail to `${XDG_STATE_HOME}/wfctl/plugins/wfctl/dns-audit.jsonl` |
+| Self-hosted runner for IaC CI | PR 1-4 live tests env-gated; CI workflow uses self-hosted runner already |
+| Plugin minEngineVersion + capabilities populated | PR 7 bumps workflow-plugin-infra to v1.0.0 (capability surface shrink) |
+| Cross-cutting orchestrator commands → wfctl builtin | PR 6 `wfctl dns-policy *` builtin; explicitly justified by rev-3 design-guidance §CLI |
+
+---
+
+## Verification per change class
+
+| Task | Class | Verification |
+|---|---|---|
+| Tasks 1-13 (provider EnumerateAll) | Plugin/extension + multi-component | unit tests pass; live test env-gated; representative call returns expected `[]ResourceOutput` |
+| Tasks 14-17 (import-all CLI) | CLI command + multi-component | `wfctl infra import-all --help` exits 0; e2e against ≥1 real provider plugin loaded |
+| Tasks 18-24 (dns-policy + relocation) | CLI command + internal logic + path migration | unit tests; `wfctl dns-policy show --help` correct; gate hook tests pass; audit JSONL migration smoke run |
+| Tasks 25-28 (infra strip) | Plugin/extension + proto break + version pin update | `go build ./...` exits 0 post-strip; version-skew audit clean; `wfctl plugin verify-capabilities workflow-plugin-infra` passes |
+| Tasks 29-32 (scenarios) | Multi-component boundary + integration | scenarios run with stub plugin; cross-provider transfer asserts (type,name,data,ttl) equality; delegation scenario walks two providers |
+
+Runtime-launch-validation triggers (build/deployment/version pins/plugin loading) apply to: Task 28 (workflow-plugin-infra major bump + capability change); Task 24 (wfctl version bump). Both carry rollback notes in their task bodies.
+
+---
+
+## PR 1 — workflow-plugin-digitalocean: EnumerateAll for infra.dns
+
+**Repo:** `/Users/jon/workspace/workflow-plugin-digitalocean`
+**Branch:** `feat/dns-enumerate-all-2026-05-26T1900`
+
+### Task 1: Add unit test for EnumerateAll("infra.dns")
+
+**Files:**
+- Test: `internal/provider_enumerator_test.go` (modify; existing test file for spaces_key enum sits here)
+
+**Step 1: Write failing test**
+
+```go
+func TestDOProvider_EnumerateAll_DNS_paginates(t *testing.T) {
+    ctx := context.Background()
+    mockDomains := &mockDomainsClient{
+        pages: [][]godo.Domain{
+            {{Name: "alpha.test", TTL: 1800}, {Name: "beta.test", TTL: 3600}},
+            {{Name: "gamma.test", TTL: 1800}},
+        },
+    }
+    p := &DOProvider{client: &godo.Client{Domains: mockDomains}}
+    out, err := p.EnumerateAll(ctx, "infra.dns")
+    if err != nil { t.Fatalf("EnumerateAll: %v", err) }
+    if len(out) != 3 { t.Fatalf("want 3 zones; got %d", len(out)) }
+    if out[0].Outputs["zone"] != "alpha.test" { t.Errorf("zone[0] = %v", out[0].Outputs["zone"]) }
+    if out[0].ProviderID != "alpha.test" { t.Errorf("providerID[0] = %v", out[0].ProviderID) }
+    if out[0].Outputs["ttl"].(int) != 1800 { t.Errorf("ttl[0] = %v", out[0].Outputs["ttl"]) }
+}
+
+func TestDOProvider_EnumerateAll_DNS_uninitialized(t *testing.T) {
+    p := &DOProvider{client: nil}
+    _, err := p.EnumerateAll(context.Background(), "infra.dns")
+    if err == nil || !strings.Contains(err.Error(), "not initialized") {
+        t.Fatalf("want not-initialized error; got %v", err)
+    }
+}
+```
+
+`mockDomainsClient` stub mirrors existing `mockSpacesKeysClient` pattern; emits paginated responses, supports `Links.Pages.Next` to terminate.
+
+**Step 2: Run test to verify failure**
+
+Run: `GOWORK=off go test -run 'TestDOProvider_EnumerateAll_DNS' ./internal/...`
+Expected: FAIL — `EnumerateAll: resource type "infra.dns" not supported`
+
+**Step 3: Commit failing test**
+
+```bash
+git add internal/provider_enumerator_test.go
+git commit -m "test(provider): add failing EnumerateAll infra.dns coverage"
+```
+
+### Task 2: Implement enumerateAllDNS
+
+**Files:**
+- Modify: `internal/provider.go:670-760` (EnumerateAll switch + add private helper)
+
+**Step 1: Add case to switch**
+
+In `EnumerateAll` body (around line 687):
+
+```go
+case "infra.dns":
+    return p.enumerateAllDNS(ctx)
+```
+
+**Step 2: Implement helper**
+
+Append to `internal/provider.go`:
+
+```go
+// enumerateAllDNS paginates GET /v2/domains via godo's Domains.List using
+// ListOptions{Page,PerPage:200}; loop terminates when godo signals last page.
+// Each *ResourceOutput carries the zone name + ttl + zone_file for the
+// import-all path to feed into IaCProvider.Import.
+func (p *DOProvider) enumerateAllDNS(ctx context.Context) ([]*interfaces.ResourceOutput, error) {
+    var all []*interfaces.ResourceOutput
+    opt := &godo.ListOptions{Page: 1, PerPage: 200}
+    for {
+        domains, resp, err := p.client.Domains.List(ctx, opt)
+        if err != nil {
+            return nil, fmt.Errorf("digitalocean: EnumerateAll infra.dns: list page=%d: %w", opt.Page, err)
+        }
+        for _, d := range domains {
+            outputs := map[string]any{
+                "zone":      d.Name,
+                "ttl":       d.TTL,
+                "zone_file": d.ZoneFile,
+            }
+            all = append(all, &interfaces.ResourceOutput{
+                ProviderID: d.Name,
+                Type:       "infra.dns",
+                Outputs:    outputs,
+            })
+        }
+        if resp == nil || resp.Links == nil || resp.Links.Pages == nil || resp.Links.Pages.Next == "" {
+            break
+        }
+        page, perPage, err := resp.Links.CurrentPage()
+        if err != nil {
+            return nil, fmt.Errorf("digitalocean: EnumerateAll infra.dns: parse next page: %w", err)
+        }
+        opt.Page = page + 1
+        _ = perPage
+    }
+    return all, nil
+}
+```
+
+**Step 3: Run unit tests**
+
+Run: `GOWORK=off go test -run 'TestDOProvider_EnumerateAll_DNS' ./internal/...`
+Expected: PASS — both tests green.
+
+**Step 4: Run broader provider tests** (no regression)
+
+Run: `GOWORK=off go test ./internal/...`
+Expected: PASS — all provider tests including existing spaces_key enumerator tests still green.
+
+**Step 5: Commit**
+
+```bash
+git add internal/provider.go
+git commit -m "feat(provider): implement EnumerateAll for infra.dns via godo Domains.List"
+```
+
+### Task 3: Live integration test (env-gated)
+
+**Files:**
+- Test: `internal/provider_enumerator_live_test.go` (new)
+
+**Step 1: Write env-gated test**
+
+```go
+//go:build live_dns
+
+package internal
+
+import (
+    "context"
+    "os"
+    "testing"
+)
+
+func TestDOProvider_EnumerateAll_DNS_live(t *testing.T) {
+    if os.Getenv("INFRA_DNS_ENUMERATE_LIVE") != "1" {
+        t.Skip("set INFRA_DNS_ENUMERATE_LIVE=1 + DIGITALOCEAN_TOKEN to run")
+    }
+    p := newRealProvider(t) // helper from existing live test file pattern
+    out, err := p.EnumerateAll(context.Background(), "infra.dns")
+    if err != nil { t.Fatalf("live EnumerateAll: %v", err) }
+    if len(out) == 0 { t.Skip("account has zero zones; cannot validate") }
+    for _, o := range out {
+        if o.ProviderID == "" { t.Errorf("empty ProviderID for %+v", o.Outputs) }
+        if o.Type != "infra.dns" { t.Errorf("wrong Type %q", o.Type) }
+    }
+    t.Logf("enumerated %d zones from live account", len(out))
+}
+```
+
+`newRealProvider(t)` helper exists per prior live-test patterns; if missing in this repo, copy from spaces_key live test scaffolding.
+
+**Step 2: Smoke run locally if creds available**
+
+Run: `INFRA_DNS_ENUMERATE_LIVE=1 DIGITALOCEAN_TOKEN=$TOKEN GOWORK=off go test -tags live_dns -run TestDOProvider_EnumerateAll_DNS_live ./internal/...`
+Expected: PASS (or SKIP if zero zones); log shows enumerated count.
+
+**Step 3: Commit + push branch**
+
+```bash
+git add internal/provider_enumerator_live_test.go
+git commit -m "test(provider): add env-gated live EnumerateAll infra.dns test"
+git push -u origin feat/dns-enumerate-all-2026-05-26T1900
+```
+
+**Step 4: Open PR**
+
+```bash
+gh pr create --title "feat(provider): EnumerateAll for infra.dns" \
+  --body "Implements IaCProviderEnumerator.EnumerateAll(\"infra.dns\") via godo Domains.List paginated. Returns one *ResourceOutput per zone with ProviderID=zone-name + Outputs={zone, ttl, zone_file}.
+
+Part of cross-repo cascade docs/plans/2026-05-26-dns-provider-contract.md (workflow-plugin-infra). Unblocks wfctl infra import-all path for DO zones.
+
+Live integration test env-gated on INFRA_DNS_ENUMERATE_LIVE=1." \
+  --base main
+```
+
+Add Copilot reviewer per memory feedback (skip per memory `feedback_copilot_review_broken_2026_05.md` if service still broken; CI green + admin-merge suffices).
+
+---
+
+## PR 2 — workflow-plugin-cloudflare: EnumerateAll for infra.dns
+
+**Repo:** `/Users/jon/workspace/workflow-plugin-cloudflare`
+**Branch:** `feat/dns-enumerate-all-2026-05-26T1900`
+
+### Task 4: Add unit test for EnumerateAll("infra.dns")
+
+**Files:**
+- Test: `internal/iacserver_test.go` (modify; existing test file has IaC server scaffolding)
+
+**Step 1: Write failing test**
+
+```go
+func TestCfProvider_EnumerateAll_DNS_paginates(t *testing.T) {
+    ctx := context.Background()
+    stub := &fakeCFClient{
+        zones: []zones.Zone{
+            {ID: "zid-1", Name: "alpha.test", Account: zones.ZoneAccount{ID: "acct-1"}},
+            {ID: "zid-2", Name: "beta.test", Account: zones.ZoneAccount{ID: "acct-1"}},
+        },
+    }
+    p := &cfProvider{client: stub}
+    out, err := p.EnumerateAll(ctx, "infra.dns")
+    if err != nil { t.Fatalf("EnumerateAll: %v", err) }
+    if len(out) != 2 { t.Fatalf("want 2; got %d", len(out)) }
+    if out[0].ProviderID != "zid-1" { t.Errorf("providerID[0] = %v", out[0].ProviderID) }
+    if out[0].Outputs["zone"] != "alpha.test" { t.Errorf("zone[0] = %v", out[0].Outputs["zone"]) }
+    if out[0].Outputs["account_id"] != "acct-1" { t.Errorf("account_id[0] = %v", out[0].Outputs["account_id"]) }
+}
+```
+
+Extend the existing `fakeCFClient` in the test file with a `zones []zones.Zone` field + `ListZones(ctx, *zones.ZoneListParams) iter.Seq2[zones.Zone, error]` method (matches cloudflare-go/v7 iterator pattern).
+
+**Step 2: Run failing test**
+
+Run: `GOWORK=off go test -run 'TestCfProvider_EnumerateAll_DNS' ./internal/...`
+Expected: FAIL — `EnumerateAll: resource type "infra.dns" not supported` or method-missing if cfProvider doesn't yet implement EnumerateAll.
+
+**Step 3: Commit failing test**
+
+```bash
+git add internal/iacserver_test.go
+git commit -m "test(provider): add failing EnumerateAll infra.dns coverage"
+```
+
+### Task 5: Implement EnumerateAll on cfProvider
+
+**Files:**
+- Modify: `internal/iacserver.go` (add EnumerateAll method to cfProvider)
+- Modify: `internal/drivers/dns.go` (sdkClient ListZones method if not present)
+
+**Step 1: Add EnumerateAll to cfProvider**
+
+In `internal/iacserver.go`:
+
+```go
+// EnumerateAll implements interfaces.Enumerator for infra.dns. Pages via
+// cloudflare-go's Zones().List iterator. Per-zone account_id captured for
+// downstream Import operations.
+func (p *cfProvider) EnumerateAll(ctx context.Context, resourceType string) ([]*interfaces.ResourceOutput, error) {
+    if p.client == nil {
+        return nil, fmt.Errorf("cloudflare: EnumerateAll called on uninitialized provider")
+    }
+    if resourceType != "infra.dns" {
+        return nil, fmt.Errorf("cloudflare: EnumerateAll: resource type %q not supported", resourceType)
+    }
+    var out []*interfaces.ResourceOutput
+    for zone, err := range p.client.ListZones(ctx, &zones.ZoneListParams{}) {
+        if err != nil {
+            return nil, fmt.Errorf("cloudflare: EnumerateAll infra.dns: %w", err)
+        }
+        out = append(out, &interfaces.ResourceOutput{
+            ProviderID: zone.ID,
+            Type:       "infra.dns",
+            Outputs: map[string]any{
+                "zone":       zone.Name,
+                "account_id": zone.Account.ID,
+                "zone_id":    zone.ID,
+            },
+        })
+    }
+    return out, nil
+}
+```
+
+**Step 2: Add ListZones to sdkClient if not present**
+
+Check `internal/drivers/dns.go` for existing `ListZones` on `sdkClient`. If absent, add:
+
+```go
+func (c *sdkClient) ListZones(ctx context.Context, params *zones.ZoneListParams) iter.Seq2[zones.Zone, error] {
+    return c.api.Zones.ListAutoPaging(ctx, *params)
+}
+```
+
+(Matches cloudflare-go/v7 `*cloudflare.Client.Zones.ListAutoPaging` signature.)
+
+**Step 3: Run unit tests**
+
+Run: `GOWORK=off go test -run 'TestCfProvider_EnumerateAll_DNS' ./internal/...`
+Expected: PASS.
+
+**Step 4: Broader test run**
+
+Run: `GOWORK=off go test ./internal/...`
+Expected: PASS — no regression in existing CF tests.
+
+**Step 5: Commit**
+
+```bash
+git add internal/iacserver.go internal/drivers/dns.go
+git commit -m "feat(provider): implement EnumerateAll for infra.dns via cloudflare-go ListAutoPaging"
+```
+
+### Task 6: Live integration test + open PR
+
+**Files:**
+- Test: `internal/iacserver_live_test.go` (new)
+
+**Step 1: Env-gated live test**
+
+```go
+//go:build live_dns
+
+package internal
+
+import (
+    "context"
+    "os"
+    "testing"
+)
+
+func TestCfProvider_EnumerateAll_DNS_live(t *testing.T) {
+    if os.Getenv("INFRA_DNS_ENUMERATE_LIVE") != "1" {
+        t.Skip("set INFRA_DNS_ENUMERATE_LIVE=1 + CLOUDFLARE_API_TOKEN to run")
+    }
+    p := newLiveCfProvider(t) // helper using CLOUDFLARE_API_TOKEN
+    out, err := p.EnumerateAll(context.Background(), "infra.dns")
+    if err != nil { t.Fatalf("live EnumerateAll: %v", err) }
+    if len(out) == 0 { t.Skip("account has zero zones") }
+    for _, o := range out {
+        if o.ProviderID == "" { t.Errorf("empty zone ID for %+v", o.Outputs) }
+    }
+    t.Logf("enumerated %d zones", len(out))
+}
+```
+
+**Step 2: Smoke + commit + push**
+
+```bash
+git add internal/iacserver_live_test.go
+git commit -m "test(provider): env-gated live EnumerateAll infra.dns test"
+git push -u origin feat/dns-enumerate-all-2026-05-26T1900
+```
+
+**Step 3: Open PR**
+
+```bash
+gh pr create --title "feat(provider): EnumerateAll for infra.dns" \
+  --body "Implements IaCProviderEnumerator.EnumerateAll for cloudflare via cloudflare-go ListAutoPaging. Per-zone Outputs include account_id (required for downstream Import operations). Live test env-gated on INFRA_DNS_ENUMERATE_LIVE=1. Part of cross-repo cascade docs/plans/2026-05-26-dns-provider-contract.md (workflow-plugin-infra)." \
+  --base main
+```
+
+---
+
+## PR 3 — workflow-plugin-namecheap: EnumerateAll for infra.dns
+
+**Repo:** `/Users/jon/workspace/workflow-plugin-namecheap`
+**Branch:** `feat/dns-enumerate-all-2026-05-26T1900`
+
+### Task 7: Add unit test
+
+**Files:**
+- Test: `internal/iacserver_test.go` (modify)
+
+**Step 1: Failing test**
+
+```go
+func TestNcProvider_EnumerateAll_DNS(t *testing.T) {
+    ctx := context.Background()
+    stub := &fakeNCClient{
+        getList: &namecheap.DomainsGetListResult{
+            Domains: []namecheap.Domain{
+                {Name: "alpha.test", IsUsingOurDns: true, Expires: "2027-01-01"},
+                {Name: "beta.test", IsUsingOurDns: false, Expires: "2026-08-15"},
+            },
+        },
+    }
+    p := &ncProvider{client: stub}
+    out, err := p.EnumerateAll(ctx, "infra.dns")
+    if err != nil { t.Fatalf("EnumerateAll: %v", err) }
+    if len(out) != 2 { t.Fatalf("want 2; got %d", len(out)) }
+    if out[0].ProviderID != "alpha.test" { t.Errorf("providerID[0] = %v", out[0].ProviderID) }
+    if out[0].Outputs["is_using_our_dns"].(bool) != true { t.Errorf("is_using_our_dns[0]") }
+    if out[1].Outputs["is_using_our_dns"].(bool) != false { t.Errorf("is_using_our_dns[1]") }
+}
+```
+
+Extend `fakeNCClient` test helper with a `GetList(*namecheap.DomainsGetListArgs)` method. Reference `go-namecheap-sdk` API for exact arg type.
+
+**Step 2: Verify failure + commit**
+
+```bash
+GOWORK=off go test -run TestNcProvider_EnumerateAll_DNS ./internal/...
+# Expect: FAIL — method not implemented or unsupported type
+git add internal/iacserver_test.go
+git commit -m "test(provider): failing EnumerateAll infra.dns coverage"
+```
+
+### Task 8: Implement EnumerateAll on ncProvider
+
+**Files:**
+- Modify: `internal/iacserver.go`
+
+**Step 1: Implementation**
+
+```go
+// EnumerateAll implements interfaces.Enumerator for infra.dns. Uses
+// namecheap-go-sdk Domains.GetList; paginates via PageSize/Page args.
+// is_using_our_dns surfaced so operators can identify zones registered
+// at NC but with authority pointed elsewhere.
+func (p *ncProvider) EnumerateAll(ctx context.Context, resourceType string) ([]*interfaces.ResourceOutput, error) {
+    if p.client == nil {
+        return nil, fmt.Errorf("namecheap: EnumerateAll called on uninitialized provider")
+    }
+    if resourceType != "infra.dns" {
+        return nil, fmt.Errorf("namecheap: EnumerateAll: resource type %q not supported", resourceType)
+    }
+    var out []*interfaces.ResourceOutput
+    page := 1
+    for {
+        resp, err := p.client.GetList(&namecheap.DomainsGetListArgs{Page: page, PageSize: 100})
+        if err != nil {
+            return nil, fmt.Errorf("namecheap: EnumerateAll infra.dns: page=%d: %w", page, err)
+        }
+        if resp == nil || len(resp.Domains) == 0 {
+            break
+        }
+        for _, d := range resp.Domains {
+            out = append(out, &interfaces.ResourceOutput{
+                ProviderID: d.Name,
+                Type:       "infra.dns",
+                Outputs: map[string]any{
+                    "zone":              d.Name,
+                    "is_using_our_dns":  d.IsUsingOurDns,
+                    "expires":           d.Expires,
+                },
+            })
+        }
+        if len(resp.Domains) < 100 { break } // last page
+        page++
+    }
+    return out, nil
+}
+```
+
+**Step 2: Tests + commit**
+
+```bash
+GOWORK=off go test ./internal/...
+git add internal/iacserver.go
+git commit -m "feat(provider): implement EnumerateAll for infra.dns via go-namecheap-sdk GetList"
+```
+
+### Task 9: Live integration test + open PR
+
+**Files:**
+- Test: `internal/iacserver_live_test.go` (new)
+
+**Step 1: Live test (NC needs IP allowlist + self-hosted runner)**
+
+```go
+//go:build live_dns
+
+func TestNcProvider_EnumerateAll_DNS_live(t *testing.T) {
+    if os.Getenv("INFRA_DNS_ENUMERATE_LIVE") != "1" {
+        t.Skip("set INFRA_DNS_ENUMERATE_LIVE=1 + NAMECHEAP_API_USER + NAMECHEAP_API_KEY + NAMECHEAP_CLIENT_IP")
+    }
+    p := newLiveNcProvider(t)
+    out, err := p.EnumerateAll(context.Background(), "infra.dns")
+    if err != nil { t.Fatalf("live: %v", err) }
+    t.Logf("enumerated %d zones", len(out))
+}
+```
+
+**Step 2: Commit + push + PR**
+
+```bash
+git add internal/iacserver_live_test.go
+git commit -m "test(provider): env-gated live EnumerateAll infra.dns test"
+git push -u origin feat/dns-enumerate-all-2026-05-26T1900
+gh pr create --title "feat(provider): EnumerateAll for infra.dns" --body "Implements IaCProviderEnumerator.EnumerateAll via go-namecheap-sdk Domains.GetList. Per-zone Outputs include is_using_our_dns (NC authority flag) + expires. Live test env-gated; requires NC client_ip allowlist + self-hosted runner. Part of cross-repo cascade." --base main
+```
+
+---
+
+## PR 4 — workflow-plugin-hover: ListDomains + EnumerateAll for infra.dns
+
+**Repo:** `/Users/jon/workspace/workflow-plugin-hover`
+**Branch:** `feat/dns-enumerate-all-2026-05-26T1900`
+
+### Task 10: Add ListDomains method to pkg/hoverclient
+
+**Files:**
+- Modify: `pkg/hoverclient/client.go`
+- Test: `pkg/hoverclient/client_test.go`
+
+**Step 1: Failing test**
+
+```go
+func TestClient_ListDomains(t *testing.T) {
+    srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        if r.URL.Path != "/api/domains" { t.Errorf("path = %q", r.URL.Path) }
+        fmt.Fprintln(w, `{"succeeded":true,"domains":[{"id":"d-1","domain_name":"alpha.test"},{"id":"d-2","domain_name":"beta.test"}]}`)
+    }))
+    defer srv.Close()
+    c := newTestClient(srv)
+    domains, err := c.ListDomains(context.Background())
+    if err != nil { t.Fatalf("ListDomains: %v", err) }
+    if len(domains) != 2 { t.Fatalf("want 2; got %d", len(domains)) }
+    if domains[0].DomainName != "alpha.test" { t.Errorf("name[0] = %q", domains[0].DomainName) }
+}
+```
+
+**Step 2: Verify fail + implement**
+
+```bash
+GOWORK=off go test -run TestClient_ListDomains ./pkg/hoverclient/
+# FAIL: method not defined
+```
+
+In `pkg/hoverclient/client.go` (sibling to `GetDomain` at line 367):
+
+```go
+// ListDomains fetches all domains in the authenticated account from
+// GET /api/domains. Returns the deserialized []Domain. Login is ensured
+// before the request; CSRF not required for GET /api/domains.
+func (c *Client) ListDomains(ctx context.Context) ([]Domain, error) {
+    if err := c.ensureLogin(ctx); err != nil { return nil, fmt.Errorf("hover: login: %w", err) }
+    req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/api/domains", nil)
+    if err != nil { return nil, fmt.Errorf("hover: ListDomains: build request: %w", err) }
+    req.Header.Set("Accept", "application/json")
+    resp, err := c.httpClient.Do(req)
+    if err != nil { return nil, fmt.Errorf("hover: ListDomains: %w", err) }
+    defer resp.Body.Close()
+    if resp.StatusCode != http.StatusOK {
+        return nil, fmt.Errorf("hover: ListDomains: status %d", resp.StatusCode)
+    }
+    var body struct {
+        Succeeded bool     `json:"succeeded"`
+        Domains   []Domain `json:"domains"`
+    }
+    if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+        return nil, fmt.Errorf("hover: ListDomains: decode: %w", err)
+    }
+    if !body.Succeeded { return nil, fmt.Errorf("hover: ListDomains: API returned succeeded=false") }
+    return body.Domains, nil
+}
+```
+
+**Step 3: Run test + commit**
+
+```bash
+GOWORK=off go test ./pkg/hoverclient/
+git add pkg/hoverclient/client.go pkg/hoverclient/client_test.go
+git commit -m "feat(client): add ListDomains for account-level enumeration"
+```
+
+### Task 11: Bump pkg/hoverclient tag
+
+**Files:**
+- (none directly; tag operation)
+
+**Step 1: Tag + push**
+
+```bash
+# Verify CI green on main first
+git fetch --tags
+NEXT_TAG="v0.4.0" # minor bump for new exported method
+git tag "$NEXT_TAG"
+git push origin "$NEXT_TAG"
+```
+
+**Step 2: Confirm tag visible to consumers**
+
+```bash
+git ls-remote --tags origin | grep v0.4.0
+# Expect: ref/tags/v0.4.0 hash present
+```
+
+This tag must land BEFORE Task 12 begins so the plugin can pin the new client version.
+
+### Task 12: Implement EnumerateAll on hoverProvider
+
+**Files:**
+- Modify: `internal/iacserver.go`
+- Modify: `go.mod` (bump pkg/hoverclient pin to v0.4.0)
+- Test: `internal/iacserver_test.go`
+
+**Step 1: Failing test**
+
+```go
+func TestHoverProvider_EnumerateAll_DNS(t *testing.T) {
+    stub := &fakeHoverClient{
+        domains: []hoverclient.Domain{
+            {ID: "d-1", DomainName: "alpha.test", ExpiresAt: "2027-01-01"},
+            {ID: "d-2", DomainName: "beta.test", ExpiresAt: "2026-12-01"},
+        },
+    }
+    p := &hoverProvider{client: stub}
+    out, err := p.EnumerateAll(context.Background(), "infra.dns")
+    if err != nil { t.Fatalf("EnumerateAll: %v", err) }
+    if len(out) != 2 { t.Fatalf("want 2; got %d", len(out)) }
+    if out[0].ProviderID != "alpha.test" { t.Errorf("providerID[0] = %v", out[0].ProviderID) }
+    if out[0].Outputs["expires_at"] != "2027-01-01" { t.Errorf("expires_at[0]") }
+}
+```
+
+Extend `fakeHoverClient` with `ListDomains(ctx) ([]Domain, error)` method.
+
+**Step 2: Verify fail; bump pin; implement**
+
+```bash
+# Bump pin
+GOWORK=off go get github.com/GoCodeAlone/workflow-plugin-hover/pkg/hoverclient@v0.4.0
+GOWORK=off go mod tidy
+```
+
+In `internal/iacserver.go`:
+
+```go
+func (p *hoverProvider) EnumerateAll(ctx context.Context, resourceType string) ([]*interfaces.ResourceOutput, error) {
+    if p.client == nil {
+        return nil, fmt.Errorf("hover: EnumerateAll on uninitialized provider")
+    }
+    if resourceType != "infra.dns" {
+        return nil, fmt.Errorf("hover: EnumerateAll: resource type %q not supported", resourceType)
+    }
+    domains, err := p.client.ListDomains(ctx)
+    if err != nil { return nil, fmt.Errorf("hover: EnumerateAll infra.dns: %w", err) }
+    out := make([]*interfaces.ResourceOutput, 0, len(domains))
+    for _, d := range domains {
+        out = append(out, &interfaces.ResourceOutput{
+            ProviderID: d.DomainName,
+            Type:       "infra.dns",
+            Outputs: map[string]any{
+                "zone":       d.DomainName,
+                "expires_at": d.ExpiresAt,
+                "domain_id":  d.ID,
+            },
+        })
+    }
+    return out, nil
+}
+```
+
+**Step 3: Tests + commit**
+
+```bash
+GOWORK=off go test ./internal/...
+git add internal/iacserver.go internal/iacserver_test.go go.mod go.sum
+git commit -m "feat(provider): implement EnumerateAll for infra.dns via pkg/hoverclient ListDomains"
+```
+
+### Task 13: Live integration test + open PR
+
+**Files:**
+- Test: `internal/iacserver_live_test.go` (new)
+
+**Step 1: Live test + commit + push + PR**
+
+```go
+//go:build live_dns
+
+func TestHoverProvider_EnumerateAll_DNS_live(t *testing.T) {
+    if os.Getenv("INFRA_DNS_ENUMERATE_LIVE") != "1" {
+        t.Skip("set INFRA_DNS_ENUMERATE_LIVE=1 + HOVER_USERNAME + HOVER_PASSWORD")
+    }
+    p := newLiveHoverProvider(t)
+    out, err := p.EnumerateAll(context.Background(), "infra.dns")
+    if err != nil { t.Fatalf("live: %v", err) }
+    t.Logf("enumerated %d hover domains", len(out))
+}
+```
+
+```bash
+git add internal/iacserver_live_test.go
+git commit -m "test(provider): env-gated live EnumerateAll infra.dns test"
+git push -u origin feat/dns-enumerate-all-2026-05-26T1900
+gh pr create --title "feat(provider): ListDomains + EnumerateAll for infra.dns" \
+  --body "Adds pkg/hoverclient.ListDomains calling GET /api/domains; implements IaCProviderEnumerator.EnumerateAll(\"infra.dns\") via the new method. Bumps pkg/hoverclient to v0.4.0. Live test env-gated. Part of cross-repo cascade docs/plans/2026-05-26-dns-provider-contract.md (workflow-plugin-infra)." \
+  --base main
+```
+
+---
+
+## PR 5 — workflow: wfctl infra import-all bulk wrapper
+
+**Repo:** `/Users/jon/workspace/workflow`
+**Branch:** `feat/wfctl-infra-import-all-2026-05-26T1900`
+
+**Wait for**: PRs 1-4 merged + tagged + workflow-registry manifests refreshed.
+
+### Task 14: Add command dispatch + flag parsing
+
+**Files:**
+- Modify: `cmd/wfctl/infra.go` (add `case "import-all"` to `runInfra` switch + new `runInfraImportAll` function)
+- Modify: `cmd/wfctl/infra.go` (infraUsage block)
+
+**Step 1: Failing test**
+
+`cmd/wfctl/infra_import_all_test.go` (new):
+
+```go
+package main
+
+import (
+    "context"
+    "testing"
+)
+
+func TestRunInfraImportAll_requiresProvider(t *testing.T) {
+    err := runInfraImportAll([]string{})
+    if err == nil || !strings.Contains(err.Error(), "--provider") {
+        t.Fatalf("want --provider required error; got %v", err)
+    }
+}
+
+func TestRunInfraImportAll_requiresType(t *testing.T) {
+    err := runInfraImportAll([]string{"--provider", "digitalocean"})
+    if err == nil || !strings.Contains(err.Error(), "--type") {
+        t.Fatalf("want --type required error; got %v", err)
+    }
+}
+```
+
+**Step 2: Verify failure + scaffold function**
+
+```bash
+GOWORK=off go test -run TestRunInfraImportAll ./cmd/wfctl/...
+# FAIL: function not defined
+```
+
+In `cmd/wfctl/infra.go` (next to `runInfraImport` at line 1021):
+
+```go
+func runInfraImportAll(args []string) error {
+    fs := flag.NewFlagSet("infra import-all", flag.ContinueOnError)
+    var configFile, envName, providerName, resourceType, pluginDirFlag string
+    var dryRun bool
+    fs.StringVar(&configFile, "config", "", "Config file")
+    fs.StringVar(&configFile, "c", "", "Config file (short)")
+    fs.StringVar(&envName, "env", "", "Environment name")
+    fs.StringVar(&providerName, "provider", "", "Provider name (required)")
+    fs.StringVar(&resourceType, "type", "", "Resource type (required), e.g. infra.dns")
+    fs.BoolVar(&dryRun, "dry-run", false, "List zones without persisting")
+    fs.StringVar(&pluginDirFlag, "plugin-dir", "", "Plugin directory")
+    if err := fs.Parse(args); err != nil { return err }
+    if providerName == "" { return fmt.Errorf("import-all requires --provider") }
+    if resourceType == "" { return fmt.Errorf("import-all requires --type (e.g. infra.dns)") }
+    // TODO: dispatch
+    return nil
+}
+```
+
+Add `case "import-all"` to runInfra switch (around line 76):
+
+```go
+case "import-all":
+    return runInfraImportAll(args[1:])
+```
+
+Update `infraUsage()` body to document the new subcommand.
+
+**Step 3: Run unit tests + commit**
+
+```bash
+GOWORK=off go test -run TestRunInfraImportAll ./cmd/wfctl/...
+# PASS
+git add cmd/wfctl/infra.go cmd/wfctl/infra_import_all_test.go
+git commit -m "feat(wfctl): add infra import-all subcommand scaffold + flag parsing"
+```
+
+### Task 15: Implement enumerate + iterate dispatch
+
+**Files:**
+- Modify: `cmd/wfctl/infra.go` (runInfraImportAll body)
+
+**Step 1: Failing test**
+
+```go
+func TestRunInfraImportAll_dispatch(t *testing.T) {
+    // Use a stubbed provider that implements EnumerateAll
+    stub := &stubProvider{
+        enumerateAll: func(ctx context.Context, rt string) ([]*interfaces.ResourceOutput, error) {
+            return []*interfaces.ResourceOutput{
+                {ProviderID: "alpha.test", Type: "infra.dns", Outputs: map[string]any{"zone": "alpha.test"}},
+                {ProviderID: "beta.test", Type: "infra.dns", Outputs: map[string]any{"zone": "beta.test"}},
+            }, nil
+        },
+        importFn: func(ctx context.Context, cloudID, rt string) (*interfaces.ResourceOutput, error) {
+            return &interfaces.ResourceOutput{ProviderID: cloudID, Type: rt}, nil
+        },
+    }
+    store := newInMemoryStateStore()
+    n, err := runInfraImportAllWithDeps(context.Background(), stub, store, "infra.dns", false)
+    if err != nil { t.Fatalf("import-all: %v", err) }
+    if n != 2 { t.Errorf("imported = %d; want 2", n) }
+    if got := store.Count(); got != 2 { t.Errorf("state store count = %d; want 2", got) }
+}
+```
+
+Factor the dispatch core into `runInfraImportAllWithDeps(ctx, provider, store, resourceType, dryRun) (int, error)` for testability; `runInfraImportAll` is the CLI wrapper that resolves provider + store from config.
+
+**Step 2: Implement core**
+
+```go
+func runInfraImportAllWithDeps(ctx context.Context, provider interfaces.IaCProvider, store interfaces.IaCStateStore, resourceType string, dryRun bool) (int, error) {
+    enumerator, ok := provider.(interfaces.Enumerator)
+    if !ok { return 0, fmt.Errorf("provider does not implement EnumerateAll") }
+    outputs, err := enumerator.EnumerateAll(ctx, resourceType)
+    if err != nil { return 0, fmt.Errorf("enumerate: %w", err) }
+    imported := 0
+    var failures []string
+    for _, o := range outputs {
+        zoneName, _ := o.Outputs["zone"].(string)
+        if zoneName == "" { zoneName = o.ProviderID }
+        if dryRun {
+            fmt.Printf("would import: provider=%s zone=%s id=%s\n", "<provider>", zoneName, o.ProviderID)
+            imported++
+            continue
+        }
+        state, ierr := provider.Import(ctx, o.ProviderID, resourceType)
+        if ierr != nil {
+            failures = append(failures, fmt.Sprintf("%s: %v", zoneName, ierr))
+            continue
+        }
+        synth := buildResourceStateFromImport(zoneName, o.ProviderID, resourceType, state)
+        if serr := store.SaveResource(ctx, synth); serr != nil {
+            failures = append(failures, fmt.Sprintf("%s: save: %v", zoneName, serr))
+            continue
+        }
+        imported++
+    }
+    if len(failures) > 0 {
+        return imported, fmt.Errorf("import-all completed with %d failures:\n  %s", len(failures), strings.Join(failures, "\n  "))
+    }
+    return imported, nil
+}
+```
+
+`buildResourceStateFromImport` synthesizes a `ResourceSpec` Name from zoneName (sanitized) + uses existing helpers from `runInfraImport`.
+
+**Step 3: Wire CLI wrapper to deps + test + commit**
+
+In `runInfraImportAll`:
+```go
+provider, closer, err := resolveIaCProvider(ctx, providerType, providerCfg)
+defer closer.Close()
+store, err := resolveStateStore(cfgFile, envName)
+n, err := runInfraImportAllWithDeps(ctx, provider, store, resourceType, dryRun)
+fmt.Printf("imported %d zones\n", n)
+return err
+```
+
+```bash
+GOWORK=off go test ./cmd/wfctl/...
+git add cmd/wfctl/infra.go cmd/wfctl/infra_import_all_test.go
+git commit -m "feat(wfctl): implement infra import-all dispatch via EnumerateAll + Import"
+```
+
+### Task 16: End-to-end smoke test against real plugin
+
+**Files:**
+- Test: `cmd/wfctl/infra_import_all_e2e_test.go` (new)
+
+**Step 1: E2E test using locally-built workflow-plugin-digitalocean v0.5.x**
+
+```go
+//go:build e2e_dns_import
+
+package main
+
+func TestInfraImportAll_e2e_DO(t *testing.T) {
+    if os.Getenv("WFCTL_E2E_DNS_IMPORT") != "1" {
+        t.Skip("set WFCTL_E2E_DNS_IMPORT=1 + DIGITALOCEAN_TOKEN")
+    }
+    cfg := writeTempConfig(t, /* with iac.provider.digitalocean + iac.state.local + one infra.dns spec */)
+    err := runInfraImportAll([]string{"--config", cfg, "--provider", "digitalocean", "--type", "infra.dns"})
+    if err != nil { t.Fatalf("e2e import-all: %v", err) }
+    // Inspect state store; assert at least one resource state present
+}
+```
+
+**Step 2: Smoke + commit + push**
+
+```bash
+git add cmd/wfctl/infra_import_all_e2e_test.go
+git commit -m "test(wfctl): env-gated e2e for infra import-all against real plugin"
+```
+
+### Task 17: Open PR
+
+```bash
+git push -u origin feat/wfctl-infra-import-all-2026-05-26T1900
+gh pr create --title "feat(wfctl): infra import-all bulk wrapper" \
+  --body "Adds wfctl infra import-all subcommand. Resolves a provider plugin, calls IaCProviderEnumerator.EnumerateAll(resourceType), and iterates IaCProvider.Import for each enumerated cloud ID, persisting via the resolved state store. Per-zone failure isolated; exit nonzero only when all zones failed or no provider data returned.
+
+Verification: unit tests cover flag parsing + dispatch; env-gated e2e exercises real workflow-plugin-digitalocean plugin loading.
+
+Part of cross-repo cascade docs/plans/2026-05-26-dns-provider-contract.md (workflow-plugin-infra). Depends on PRs 1-4 in respective provider plugin repos." \
+  --base main
+```
+
+---
+
+## PR 6 — workflow: relocate dns policy/gate/audit + dns-policy commands + OnBeforeAction hook
+
+**Repo:** `/Users/jon/workspace/workflow`
+**Branch:** `feat/wfctl-dns-policy-2026-05-26T1900`
+
+**Wait for**: PR 5 merged.
+
+### Task 18: Add OnBeforeAction hook to ApplyPlanHooks
+
+**Files:**
+- Modify: `iac/wfctlhelpers/apply.go:91-110` (ApplyPlanHooks struct + callers)
+- Modify: `iac/wfctlhelpers/apply.go:270-440` (per-action loop dispatch)
+- Test: `iac/wfctlhelpers/apply_test.go` (extend)
+
+**Step 1: Failing test**
+
+```go
+func TestApplyPlan_OnBeforeAction_abortsFatal(t *testing.T) {
+    actions := []interfaces.PlanAction{
+        {Action: "create", Resource: interfaces.ResourceSpec{Name: "rec-1", Type: "infra.dns"}},
+        {Action: "create", Resource: interfaces.ResourceSpec{Name: "rec-2", Type: "infra.dns"}},
+    }
+    var beforeCalls int
+    hooks := ApplyPlanHooks{
+        OnBeforeAction: func(ctx context.Context, a interfaces.PlanAction) error {
+            beforeCalls++
+            if a.Resource.Name == "rec-1" { return fmt.Errorf("policy denied") }
+            return nil
+        },
+    }
+    err := applyPlanWithEnvProviderAndHooks(ctx, fakeProvider, plan, store, hooks)
+    if err == nil || !strings.Contains(err.Error(), "policy denied") {
+        t.Fatalf("want policy-denied fatal; got %v", err)
+    }
+    if beforeCalls != 1 { t.Errorf("OnBeforeAction called %d times; want 1 (abort on first)", beforeCalls) }
+}
+```
+
+**Step 2: Verify fail + implement**
+
+```bash
+GOWORK=off go test -run TestApplyPlan_OnBeforeAction ./iac/wfctlhelpers/
+# FAIL: field OnBeforeAction not present
+```
+
+In `iac/wfctlhelpers/apply.go:91`:
+
+```go
+type ApplyPlanHooks struct {
+    OnBeforeAction    func(ctx context.Context, action interfaces.PlanAction) error // FATAL on non-nil; aborts apply
+    OnResourceApplied func(...)
+    OnResourceDeleted func(...)
+    OnPlanComplete    func(...)
+}
+```
+
+In per-action loop (line ~280):
+
+```go
+for _, action := range plan.Actions {
+    if hooks.OnBeforeAction != nil {
+        if err := hooks.OnBeforeAction(ctx, action); err != nil {
+            return fmt.Errorf("apply aborted by pre-action hook for %s/%s: %w", action.Resource.Type, action.Resource.Name, err)
+        }
+    }
+    // ... existing dispatch
+}
+```
+
+**Step 3: Update existing callers** (those constructing `ApplyPlanHooks` literals — pass `nil` for new field; no behavior change).
+
+Grep for `ApplyPlanHooks{` and audit each call site.
+
+**Step 4: Run tests + commit**
+
+```bash
+GOWORK=off go test ./iac/wfctlhelpers/
+git add iac/wfctlhelpers/apply.go iac/wfctlhelpers/apply_test.go
+git commit -m "feat(iac): add OnBeforeAction fatal hook to ApplyPlanHooks"
+```
+
+### Task 19: Relocate dnspolicy package
+
+**Files:**
+- Create: `dns/policy/parse.go`, `dns/policy/policy.go`, `dns/policy/match.go`, `dns/policy/reader.go`, `dns/policy/writer.go`, `dns/policy/serialize.go` (copy from `workflow-plugin-infra/internal/dnspolicy/`)
+- Create: `dns/policy/*_test.go` (copy tests)
+
+**Step 1: Copy + rename package**
+
+```bash
+mkdir -p dns/policy
+cp /Users/jon/workspace/workflow-plugin-infra/internal/dnspolicy/*.go dns/policy/
+sed -i '' 's|^package dnspolicy|package policy|' dns/policy/*.go
+sed -i '' 's|github.com/GoCodeAlone/workflow-plugin-infra/internal/dnspolicy|github.com/GoCodeAlone/workflow/dns/policy|g' dns/policy/*.go
+```
+
+**Step 2: Verify package compiles + tests pass**
+
+```bash
+GOWORK=off go test ./dns/policy/
+# Expect: all parser/serializer tests green
+```
+
+**Step 3: Commit**
+
+```bash
+git add dns/policy/
+git commit -m "feat(dns/policy): relocate parser from workflow-plugin-infra/internal/dnspolicy"
+```
+
+### Task 20: Relocate dnsgate package + adapt to driver-based dispatch
+
+**Files:**
+- Create: `dns/gate/gate.go` (new; mirrors `workflow-plugin-infra/internal/dnsgate/gate.go` but dispatches via `interfaces.ResourceDriver` not `dnspolicy.Adapter`)
+- Test: `dns/gate/gate_test.go`
+
+**Step 1: Failing test**
+
+```go
+func TestGate_AllowsOwner(t *testing.T) {
+    g := &Gate{
+        Reader: stubReader{policyTXT: []string{"v=1; owner=ratchet; delegate=multisite:www,admin"}},
+    }
+    err := g.CheckAllowed(context.Background(), "example.test", "bandname", "CNAME", "multisite")
+    if !errors.Is(err, ErrPolicyDenied) && err != nil {
+        t.Errorf("want allow or denied error; got %v", err)
+    }
+    // multisite is not delegated for "bandname"; expect ErrPolicyDenied
+    if err == nil { t.Error("want ErrPolicyDenied for bandname under multisite delegate; got allow") }
+}
+```
+
+**Step 2: Implement** (adapts existing dnsgate logic to read TXT via `ResourceDriver.Read(zoneRef)` then parse via `dns/policy`)
+
+```go
+package gate
+
+type Gate struct {
+    Reader interface {
+        GetTXT(ctx context.Context, name string) ([]string, error)
+    }
+}
+
+func (g *Gate) CheckAllowed(ctx context.Context, zone, recordName, recordType, owner string) error {
+    txt, err := g.Reader.GetTXT(ctx, "_workflow-dns-policy."+zone)
+    if err != nil { return fmt.Errorf("read policy TXT: %w", err) }
+    p, err := policy.Parse(zone, txt)
+    if err != nil { return fmt.Errorf("parse policy: %w", err) }
+    return p.CheckAllowed(recordName, recordType, owner)
+}
+```
+
+Adapter wiring (the `Reader` interface) connects to `ResourceDriver.Read` + scanning returned record list for `TXT _workflow-dns-policy.<zone>` records. Provided in a sibling `dns/gate/driver_reader.go`:
+
+```go
+type DriverReader struct {
+    Driver interfaces.ResourceDriver
+    Zone   string
+}
+
+func (r *DriverReader) GetTXT(ctx context.Context, name string) ([]string, error) {
+    out, err := r.Driver.Read(ctx, interfaces.ResourceRef{Type: "infra.dns", ProviderID: r.Zone})
+    if err != nil { return nil, err }
+    records, _ := out.Outputs["records"].([]map[string]any)
+    var values []string
+    for _, rec := range records {
+        if rec["type"] == "TXT" && rec["name"] == name {
+            if v, ok := rec["data"].(string); ok { values = append(values, v) }
+        }
+    }
+    return values, nil
+}
+```
+
+**Step 3: Tests + commit**
+
+```bash
+GOWORK=off go test ./dns/gate/
+git add dns/gate/
+git commit -m "feat(dns/gate): relocate gate; adapt to ResourceDriver.Read TXT scanning"
+```
+
+### Task 21: Relocate dnsaudit package
+
+**Files:**
+- Create: `dns/audit/audit.go`, `dns/audit/audit_test.go` (copy + rename from `workflow-plugin-infra/internal/dnsaudit/`)
+- Audit path: now `${XDG_STATE_HOME:-$HOME/.local/state}/wfctl/plugins/wfctl/dns-audit.jsonl`
+
+**Step 1: Copy + rename**
+
+```bash
+mkdir -p dns/audit
+cp /Users/jon/workspace/workflow-plugin-infra/internal/dnsaudit/*.go dns/audit/
+sed -i '' 's|^package dnsaudit|package audit|' dns/audit/*.go
+sed -i '' 's|plugins/infra/dns-audit.jsonl|plugins/wfctl/dns-audit.jsonl|' dns/audit/audit.go
+```
+
+**Step 2: Add one-time migration**
+
+In `dns/audit/audit.go`, on initialization (idempotent): if old path exists, append its contents to new path + leave old file in place (for follow-up cleanup). Migration logged at INFO.
+
+**Step 3: Tests + commit**
+
+```bash
+GOWORK=off go test ./dns/audit/
+git add dns/audit/
+git commit -m "feat(dns/audit): relocate trail to wfctl-builtin path; one-time migration"
+```
+
+### Task 22: Add wfctl dns-policy commands (show, set, transfer-ownership, drift)
+
+**Files:**
+- Create: `cmd/wfctl/dns_policy.go`
+- Test: `cmd/wfctl/dns_policy_test.go`
+- Modify: `cmd/wfctl/main.go` (register "dns-policy" in `commands` map)
+- Modify: `cmd/wfctl/plugin_cli_commands.go` (add "dns-policy" to `reservedCLICommands`)
+
+**Step 1: Failing test for usage**
+
+```go
+func TestRunDNSPolicy_help(t *testing.T) {
+    err := runDNSPolicy([]string{"--help"})
+    // expect non-nil but with helpful text; assert each subcommand listed
+    // OR runDNSPolicy returns nil with usage on stdout
+}
+
+func TestRunDNSPolicyShow_requiresZone(t *testing.T) {
+    err := runDNSPolicy([]string{"show", "--provider", "digitalocean"})
+    if err == nil || !strings.Contains(err.Error(), "--zone") {
+        t.Fatalf("want --zone required; got %v", err)
+    }
+}
+```
+
+**Step 2: Scaffold + implement**
+
+```go
+package main
+
+import (
+    // ...
+    "github.com/GoCodeAlone/workflow/dns/policy"
+    "github.com/GoCodeAlone/workflow/dns/audit"
+)
+
+func runDNSPolicy(args []string) error {
+    if len(args) < 1 { return dnsPolicyUsage() }
+    switch args[0] {
+    case "show":             return runDNSPolicyShow(args[1:])
+    case "set":              return runDNSPolicySet(args[1:])
+    case "transfer-ownership": return runDNSPolicyTransfer(args[1:])
+    case "drift":            return runDNSPolicyDrift(args[1:])
+    default: return dnsPolicyUsage()
+    }
+}
+
+func runDNSPolicyShow(args []string) error {
+    fs := flag.NewFlagSet("dns-policy show", flag.ContinueOnError)
+    var configFile, envName, zone, providerName string
+    fs.StringVar(&configFile, "config", "", "Config file")
+    fs.StringVar(&envName, "env", "", "Environment name")
+    fs.StringVar(&zone, "zone", "", "Zone (required)")
+    fs.StringVar(&providerName, "provider", "", "Provider (required)")
+    if err := fs.Parse(args); err != nil { return err }
+    if zone == "" { return fmt.Errorf("dns-policy show requires --zone") }
+    if providerName == "" { return fmt.Errorf("dns-policy show requires --provider") }
+    ctx := context.Background()
+    provider, closer, err := resolveIaCProvider(ctx, providerName, /* providerCfg from infra config */)
+    if err != nil { return err }
+    defer closer.Close()
+    driver, err := provider.ResourceDriver("infra.dns")
+    if err != nil { return err }
+    out, err := driver.Read(ctx, interfaces.ResourceRef{Type: "infra.dns", ProviderID: zone})
+    if err != nil { return fmt.Errorf("read zone: %w", err) }
+    txt := extractPolicyTXT(out, zone)
+    pol, err := policy.Parse(zone, txt)
+    if err != nil { return fmt.Errorf("parse policy: %w", err) }
+    return policy.PrintPolicy(os.Stdout, pol)
+}
+
+// Similar for Set / Transfer / Drift — mirrors existing admincli logic but reads/writes via ResourceDriver, not libdns adapter.
+```
+
+Each mutating command (`set`, `transfer-ownership`) appends to `dns/audit` JSONL trail.
+
+**Step 3: Register builtin**
+
+In `cmd/wfctl/main.go:74`:
+```go
+"dns-policy": runDNSPolicy,
+```
+
+In `cmd/wfctl/plugin_cli_commands.go:16`:
+```go
+var reservedCLICommands = map[string]struct{}{
+    "plugin":     {},
+    // ...
+    "dns-policy": {}, // new
+}
+```
+
+**Step 4: Tests + commit**
+
+```bash
+GOWORK=off go test ./cmd/wfctl/
+git add cmd/wfctl/dns_policy.go cmd/wfctl/dns_policy_test.go cmd/wfctl/main.go cmd/wfctl/plugin_cli_commands.go
+git commit -m "feat(wfctl): add dns-policy command (show/set/transfer-ownership/drift)"
+```
+
+### Task 23: Wire dns-gate as OnBeforeAction for infra.dns resources
+
+**Files:**
+- Modify: `cmd/wfctl/infra.go` (`runInfraApply` constructs `ApplyPlanHooks` — wire `OnBeforeAction` to dns/gate when `infra.dns` resources present)
+
+**Step 1: Failing test (integration-style)**
+
+```go
+func TestRunInfraApply_dnsGateAborts(t *testing.T) {
+    // Setup: plan with infra.dns resource; provider stubbed; gate Reader returns TXT denying the owner
+    // Expect: applyPlan returns error with "policy denied" wrapped
+}
+```
+
+**Step 2: Implement wiring**
+
+```go
+// In runInfraApply, after plan is resolved:
+hooks := ApplyPlanHooks{}
+hooks.OnBeforeAction = func(ctx context.Context, action interfaces.PlanAction) error {
+    if action.Resource.Type != "infra.dns" { return nil }
+    // Resolve driver for the zone
+    driver, err := provider.ResourceDriver("infra.dns")
+    if err != nil { return err }
+    g := &gate.Gate{Reader: &gate.DriverReader{Driver: driver, Zone: action.Resource.ProviderID}}
+    return g.CheckAllowed(ctx, action.Resource.ProviderID, /* record name from action */, /* record type */, currentOwner)
+}
+```
+
+**Step 3: Tests + commit**
+
+```bash
+GOWORK=off go test ./cmd/wfctl/
+git add cmd/wfctl/infra.go cmd/wfctl/infra_apply_test.go
+git commit -m "feat(wfctl): wire dns-gate as OnBeforeAction for infra.dns resources during apply"
+```
+
+### Task 24: Push branch + open PR
+
+**Files:**
+- (none directly)
+
+**Step 1: Final test sweep**
+
+```bash
+GOWORK=off go test ./...
+```
+
+**Step 2: Push + PR**
+
+```bash
+git push -u origin feat/wfctl-dns-policy-2026-05-26T1900
+gh pr create --title "feat(wfctl): dns-policy + OnBeforeAction hook + relocate dns packages" \
+  --body "Phase 3a of cross-repo DNS cascade. Highlights:
+
+- Adds OnBeforeAction (fatal) hook to ApplyPlanHooks
+- Adds workflow/dns/{policy,gate,audit} packages (relocated from workflow-plugin-infra)
+- Adds wfctl dns-policy {show,set,transfer-ownership,drift} commands
+- Wires dns-gate as OnBeforeAction during wfctl infra apply for infra.dns resources
+- Audit trail at \${XDG_STATE_HOME}/wfctl/plugins/wfctl/dns-audit.jsonl (one-time migration from old plugins/infra/ path)
+
+Pairs with workflow-plugin-infra strip PR (Phase 3b).
+
+Rollback: revert commit; the workflow-plugin-infra plugin still has its admincli intact pre-Phase-3b — system continues working via the old plugin-cliCommands path.
+
+Design: workflow-plugin-infra/docs/plans/2026-05-26-dns-provider-contract-design.md" \
+  --base main
+```
+
+---
+
+## PR 7 — workflow-plugin-infra: strip libdns + admincli + dns packages + remove dns_record step
+
+**Repo:** `/Users/jon/workspace/workflow-plugin-infra`
+**Branch:** `refactor/strip-dns-libdns-2026-05-26T1900`
+
+**Wait for**: PR 6 merged + tagged.
+
+### Task 25: Delete admincli + dnsprovider + dnspolicy + dnsgate + dnsaudit packages
+
+**Files:**
+- Delete: `internal/admincli/` (entire directory)
+- Delete: `internal/dnsprovider/` (entire directory)
+- Delete: `internal/dnspolicy/` (entire directory)
+- Delete: `internal/dnsgate/` (entire directory)
+- Delete: `internal/dnsaudit/` (entire directory)
+
+**Step 1: Delete + verify no in-repo imports remain**
+
+```bash
+git rm -r internal/admincli internal/dnsprovider internal/dnspolicy internal/dnsgate internal/dnsaudit
+grep -rn 'workflow-plugin-infra/internal/dns\|workflow-plugin-infra/internal/admincli' . | grep -v _worktrees
+# Expect: zero hits (plugin.go callers handled in Task 26)
+```
+
+**Step 2: Commit**
+
+```bash
+git commit -m "refactor: delete admincli + dnspolicy/gate/audit/provider packages (relocated to workflow)"
+```
+
+### Task 26: Remove DNSRecordStepConfig from proto + drop step handler + drop infra.dns_record step type
+
+**Files:**
+- Modify: `internal/contracts/infra.proto` (delete `DNSRecordStepConfig` message)
+- Modify: `internal/plugin.go` (delete step handler lines 130-170 + step factory registration)
+- Modify: `plugin.json` (remove `infra.dns_record` from `capabilities.stepTypes`)
+- Modify: any generated `*.pb.go` files (re-generate after proto change)
+
+**Step 1: Drop proto message**
+
+In `internal/contracts/infra.proto`:
+```diff
+-message DNSRecordStepConfig {
+-    string provider = 1;
+-    map<string, string> provider_creds = 2;
+-    string zone = 3;
+-    // ...
+-}
+```
+
+Regenerate stubs:
+```bash
+make proto  # or buf generate, per repo's makefile
+```
+
+**Step 2: Drop step handler from plugin.go**
+
+Delete the `DNSRecordStepFactory` registration + handler implementation. Verify no remaining `dnsprovider.*` references compile.
+
+**Step 3: Drop step type from plugin.json**
+
+```diff
+-"stepTypes": ["infra.dns_record"],
++"stepTypes": [],
+```
+
+**Step 4: Compile + commit**
+
+```bash
+GOWORK=off go build ./...
+git add internal/contracts/infra.proto internal/plugin.go internal/contracts/*.pb.go plugin.json
+git commit -m "refactor: remove infra.dns_record step + DNSRecordStepConfig proto (peer-dispatch infeasible)"
+```
+
+### Task 27: Drop libdns deps from go.mod + remove infra-dns cliCommand
+
+**Files:**
+- Modify: `go.mod`
+- Modify: `go.sum`
+- Modify: `plugin.json` (remove `cliCommands` entry for `infra-dns`)
+
+**Step 1: Drop deps**
+
+```bash
+GOWORK=off go mod edit -droprequire=github.com/libdns/libdns
+GOWORK=off go mod edit -droprequire=github.com/libdns/cloudflare
+GOWORK=off go mod edit -droprequire=github.com/libdns/digitalocean
+GOWORK=off go mod edit -droprequire=github.com/libdns/namecheap
+GOWORK=off go mod edit -droprequire=github.com/libdns/route53
+GOWORK=off go mod edit -droprequire=github.com/libdns/googleclouddns
+GOWORK=off go mod edit -droprequire=github.com/libdns/azure
+# Drop any libdns/godaddy etc. shipped in v2
+GOWORK=off go mod tidy
+```
+
+**Step 2: Remove infra-dns cliCommand from plugin.json**
+
+```diff
+-"cliCommands": [{ "name": "infra-dns", "description": "..." }],
++"cliCommands": [],
+```
+
+**Step 3: Build + commit**
+
+```bash
+GOWORK=off go build ./...
+GOWORK=off go test ./...
+git add go.mod go.sum plugin.json
+git commit -m "refactor: drop libdns/* deps + infra-dns cliCommand (Phase 3b)"
+```
+
+### Task 28: Major version bump + push + PR
+
+**Files:**
+- Modify: `plugin.json` (version field)
+- Modify: `internal/version.go` (if Version constant present)
+
+**Step 1: Bump version**
+
+```diff
+-"version": "0.X.Y",
++"version": "1.0.0",
+```
+
+Capabilities surface has shrunk + proto contract broke → major bump per semver.
+
+**Step 2: Run full test suite + version-skew audit**
+
+```bash
+GOWORK=off go test ./...
+# Also run wfctl plugin verify-capabilities against the locally built binary
+wfctl plugin verify-capabilities ./bin/workflow-plugin-infra
+# Expect: capabilities reported match plugin.json
+```
+
+**Step 3: Commit + push + PR**
+
+```bash
+git add plugin.json internal/version.go
+git commit -m "chore: bump to v1.0.0 (capability surface shrink + proto break)"
+git push -u origin refactor/strip-dns-libdns-2026-05-26T1900
+
+gh pr create --title "refactor: strip libdns + admincli + dns packages + remove dns_record step" \
+  --body "Phase 3b of cross-repo DNS cascade. workflow-plugin-infra becomes a thin abstract-module-types-only plugin.
+
+Changes:
+- DELETE internal/admincli, internal/dnsprovider, internal/dnspolicy, internal/dnsgate, internal/dnsaudit
+- DROP libdns/* deps from go.mod
+- REMOVE infra.dns_record step type + DNSRecordStepConfig proto (peer-dispatch infeasible from step handler context; per-record workflows route through wfctl infra apply or wfctl dns-policy *)
+- REMOVE infra-dns cliCommand (commands moved to wfctl dns-policy builtin in PR 6)
+- BUMP to v1.0.0 (capability surface shrink + breaking proto change)
+
+Rollback: revert commit + ensure PR 6 is also reverted (revert PR 7 first, then PR 6 — see design doc Rollback section). After revert, libdns + admincli code restored from git history.
+
+Runtime-launch-validation: post-merge, verify wfctl loads workflow-plugin-infra v1.0.0 without dns-related capability errors + wfctl plugin verify-capabilities passes.
+
+Design: docs/plans/2026-05-26-dns-provider-contract-design.md" \
+  --base main
+```
+
+---
+
+## PR 8 — workflow-scenarios: DNS orchestration scenarios + stub provider plugin
+
+**Repo:** `/Users/jon/workspace/workflow-scenarios`
+**Branch:** `feat/dns-orchestration-2026-05-26T1900`
+
+**Wait for**: PR 5 + PR 6 + PR 7 merged.
+
+### Task 29: Build stub IaCProvider gRPC plugin
+
+**Files:**
+- Create: `dns/stub-plugin/main.go`
+- Create: `dns/stub-plugin/fixtures/example.yaml`
+- Create: `dns/stub-plugin/go.mod`
+
+**Step 1: Scaffold stub plugin**
+
+```go
+package main
+
+import (
+    "context"
+    "os"
+    "github.com/GoCodeAlone/workflow/plugin/external/sdk"
+    "github.com/GoCodeAlone/workflow/interfaces"
+    "gopkg.in/yaml.v3"
+)
+
+type stubServer struct {
+    fixturePath string
+}
+
+func (s *stubServer) Initialize(ctx context.Context, _ map[string]string) error { return nil }
+func (s *stubServer) Name() string { return "dns-stub" }
+func (s *stubServer) Version() string { return "0.0.1" }
+// ... required IaCProvider methods (stub impls returning canned data from fixture)
+
+func (s *stubServer) EnumerateAll(ctx context.Context, resourceType string) ([]*interfaces.ResourceOutput, error) {
+    data, _ := os.ReadFile(s.fixturePath)
+    var fixture struct{ Zones []map[string]any }
+    yaml.Unmarshal(data, &fixture)
+    var out []*interfaces.ResourceOutput
+    for _, z := range fixture.Zones {
+        out = append(out, &interfaces.ResourceOutput{
+            ProviderID: z["id"].(string),
+            Type:       resourceType,
+            Outputs:    z,
+        })
+    }
+    return out, nil
+}
+
+func (s *stubServer) Import(ctx context.Context, cloudID, resourceType string) (*interfaces.ResourceOutput, error) {
+    // Read fixture, find matching zone, return its record set
+    // ...
+}
+
+func main() {
+    fixturePath := os.Getenv("DNS_STUB_FIXTURE")
+    if fixturePath == "" { fixturePath = "fixtures/example.yaml" }
+    sdk.ServeIaCPlugin(&stubServer{fixturePath: fixturePath}, sdk.IaCServeOptions{BuildVersion: "0.0.1"})
+}
+```
+
+**Step 2: Example fixture**
+
+```yaml
+# dns/stub-plugin/fixtures/example.yaml
+zones:
+  - id: alpha.test
+    zone: alpha.test
+    records:
+      - {type: A,     name: "@",   data: "1.2.3.4", ttl: 300}
+      - {type: CNAME, name: www,   data: alpha.test, ttl: 300}
+      - {type: MX,    name: "@",   data: mail.alpha.test, ttl: 3600, priority: 10}
+```
+
+**Step 3: Build + commit**
+
+```bash
+cd dns/stub-plugin && GOWORK=off go build .
+cd ../..
+git add dns/stub-plugin/
+git commit -m "feat(scenarios): stub IaCProvider gRPC plugin for DNS orchestration tests"
+```
+
+### Task 30: Scenario 1 — import-export roundtrip
+
+**Files:**
+- Create: `dns/import-export-roundtrip/config.yaml`
+- Create: `dns/import-export-roundtrip/expected-state.json`
+- Create: `dns/import-export-roundtrip/run.sh`
+
+**Step 1: Scenario config**
+
+```yaml
+# dns/import-export-roundtrip/config.yaml
+modules:
+  - name: stub
+    type: iac.provider.stub
+resources:
+  - name: alpha-test
+    type: infra.dns
+    config:
+      provider: stub
+      domain: alpha.test
+```
+
+**Step 2: Run script**
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+# Build stub plugin
+go build -o /tmp/dns-stub ../stub-plugin/
+# wfctl invocation: import-all then plan, assert plan is no-op
+wfctl --plugin-dir=/tmp infra import-all --config=config.yaml --provider=stub --type=infra.dns
+wfctl --plugin-dir=/tmp infra plan --config=config.yaml > /tmp/plan.txt
+grep -q "No changes" /tmp/plan.txt || { echo "FAIL: plan was not NoOp"; exit 1; }
+echo "PASS: import → plan NoOp"
+```
+
+**Step 3: Commit**
+
+```bash
+chmod +x dns/import-export-roundtrip/run.sh
+git add dns/import-export-roundtrip/
+git commit -m "feat(scenarios): import-export roundtrip — assert imported state planar NoOp"
+```
+
+### Task 31: Scenario 2 — cross-provider transfer
+
+**Files:**
+- Create: `dns/cross-provider-transfer/config-source.yaml` (source: stub-A)
+- Create: `dns/cross-provider-transfer/config-target.yaml` (target: stub-B)
+- Create: `dns/cross-provider-transfer/run.sh`
+- Create: `dns/cross-provider-transfer/lossiness.yaml`
+
+**Step 1: Two stub providers**
+
+Configure two stub provider instances (stub-A as DO equivalent, stub-B as CF equivalent). Each loads same record set via fixture.
+
+**Step 2: Run script**
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+# Import from source
+wfctl infra import-all --config=config-source.yaml --provider=stub-A --type=infra.dns -o /tmp/source-state.json
+# Translate: rewrite provider field to stub-B
+jq '.resources[].provider = "stub-B"' /tmp/source-state.json > /tmp/target-state.json
+# Apply to target
+wfctl infra apply --config=config-target.yaml --state-file=/tmp/target-state.json
+# Read back from target
+wfctl infra import-all --config=config-target.yaml --provider=stub-B --type=infra.dns -o /tmp/roundtrip-state.json
+# Assert (type, name, data, ttl) equality per record per zone, EXCLUDING fields in lossiness.yaml
+python3 ../verify-transfer.py /tmp/source-state.json /tmp/roundtrip-state.json lossiness.yaml
+```
+
+**Step 3: Lossiness charter**
+
+```yaml
+# dns/cross-provider-transfer/lossiness.yaml
+exclude:
+  - {provider: cloudflare, record_type: "*",   field: proxied}
+  - {provider: namecheap,  record_type: "*",   field: email_type}
+  - {provider: namecheap,  record_type: "*",   field: is_using_our_dns}
+  - {provider: digitalocean, record_type: SRV, field: weight}
+  - {provider: digitalocean, record_type: SRV, field: port}
+  - {provider: digitalocean, record_type: CAA, field: flags}
+  - {provider: digitalocean, record_type: CAA, field: tag}
+matrix: [A, AAAA, CNAME, MX, TXT, SRV, CAA]   # NS excluded (apex provider-managed)
+```
+
+`verify-transfer.py` (small Python script) loads both state files + lossiness.yaml + asserts equality with the field masks applied.
+
+**Step 4: Commit**
+
+```bash
+chmod +x dns/cross-provider-transfer/run.sh
+git add dns/cross-provider-transfer/ scripts/verify-transfer.py
+git commit -m "feat(scenarios): cross-provider transfer with lossiness charter (per-record-type exclusions)"
+```
+
+### Task 32: Scenario 3 — delegation + open PR
+
+**Files:**
+- Create: `dns/delegation/config.yaml` (two providers, parent + child)
+- Create: `dns/delegation/run.sh`
+
+**Step 1: Two-zone config**
+
+```yaml
+# dns/delegation/config.yaml — parent zone at stub-A with NS delegation; child zone at stub-B
+modules:
+  - {name: stub-A, type: iac.provider.stub}
+  - {name: stub-B, type: iac.provider.stub}
+resources:
+  - name: parent-zone
+    type: infra.dns
+    config:
+      provider: stub-A
+      domain: example.test
+      records:
+        - {type: A,  name: "@",            data: "10.0.0.1", ttl: 300}
+        - {type: NS, name: child.example.test, data: ns1.stub-b.test, ttl: 300}
+        - {type: NS, name: child.example.test, data: ns2.stub-b.test, ttl: 300}
+  - name: child-zone
+    type: infra.dns
+    config:
+      provider: stub-B
+      domain: child.example.test
+      records:
+        - {type: A,     name: "@",  data: "10.0.0.2", ttl: 300}
+        - {type: CNAME, name: www,  data: child.example.test, ttl: 300}
+```
+
+**Step 2: Run script**
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+# Single apply: both providers, both zones
+wfctl infra apply --config=config.yaml
+# Roundtrip: import-all each provider, assert delegation NS present at parent + child records present at child
+wfctl infra import-all --config=config.yaml --provider=stub-A --type=infra.dns -o /tmp/parent-state.json
+wfctl infra import-all --config=config.yaml --provider=stub-B --type=infra.dns -o /tmp/child-state.json
+jq -e '.resources[] | select(.name=="parent-zone") | .config.records[] | select(.type=="NS" and .name=="child.example.test")' /tmp/parent-state.json
+jq -e '.resources[] | select(.name=="child-zone") | .config.records[] | length >= 2' /tmp/child-state.json
+echo "PASS: delegation NS at parent + records at child intact"
+```
+
+**Step 3: Push + open PR**
+
+```bash
+chmod +x dns/delegation/run.sh
+git add dns/delegation/
+git commit -m "feat(scenarios): delegation — parent NS + child records across two providers (single apply)"
+git push -u origin feat/dns-orchestration-2026-05-26T1900
+
+gh pr create --title "feat(scenarios): DNS orchestration tests + stub provider plugin" \
+  --body "Phase 4 of cross-repo DNS cascade. Three scenarios under dns/:
+
+- import-export-roundtrip: import zone then plan; assert NoOp
+- cross-provider-transfer: import from source provider; apply to target; assert (type, name, data, ttl) parity per the lossiness charter
+- delegation: parent zone at one provider with NS records pointing to second provider's nameservers; child zone at second provider; single wfctl infra apply manages both
+
+Stub IaCProvider gRPC plugin at dns/stub-plugin/ serves canned EnumerateAll/Import from YAML fixtures — runs locally without cloud creds.
+
+Multi-component validation: scenarios exercise real wfctl + real plugin loading via stub plugin processes. Memory-mocked HTTP is insufficient for the IaC strict-contract path.
+
+Pattern precedent for multi-provider single-config: scenario 66-iac-multi-cloud.
+
+Design: workflow-plugin-infra/docs/plans/2026-05-26-dns-provider-contract-design.md" \
+  --base main
+```
+
+---
+
+## Post-merge follow-ups (not in this plan)
+
+- Phase 5: gocodealone-dns catalog refresh design + plan (separate). Trigger: after PRs 1-8 merged. Initial catalog activation via DO + Hover (creds available); CF + NC activation pending operator-provided creds.
+- aws/azure/gcp/godaddy/route53 EnumerateAll for infra.dns (follow-up plans per provider, same shape as PR 1-4).
+- Workflow SDK extension for `engine.ResolveProvider` from plugin step handlers — if a future per-record DNS step type is required, this SDK gap (cycle-3 I-NEW-1) must be closed first.
+
+---
+
+## Change Log
+
+| Date | Author | Change |
+|---|---|---|
+| 2026-05-26 | codingsloth@pm.me | Initial plan draft (cycle 1). Mirrors design cycle 3.5. 8 PRs, 32 tasks, 6 repos. |
