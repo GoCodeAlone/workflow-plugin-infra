@@ -16,9 +16,9 @@
 
 ## Scope Manifest
 
-**PR Count:** 8
-**Tasks:** 32
-**Estimated Lines of Change:** ~3500 (informational; not enforced)
+**PR Count:** 9
+**Tasks:** 33
+**Estimated Lines of Change:** ~3600 (informational; not enforced)
 
 **Out of scope:**
 - aws/azure/gcp/godaddy/route53 EnumerateAll implementations (follow-up plans per provider; same pattern as PR 1-4).
@@ -36,6 +36,7 @@
 | 2 | feat(cf): EnumerateAll for infra.dns | Task 4, Task 5, Task 6 | `feat/dns-enumerate-all` (workflow-plugin-cloudflare) |
 | 3 | feat(nc): EnumerateAll for infra.dns | Task 7, Task 8, Task 9 | `feat/dns-enumerate-all` (workflow-plugin-namecheap) |
 | 4 | feat(hover): ListDomains + EnumerateAll for infra.dns | Task 10, Task 11, Task 12, Task 13 | `feat/dns-enumerate-all` (workflow-plugin-hover) |
+| 4.5 | chore(registry): pin-bump DO/CF/NC/Hover for EnumerateAll | Task 13.5 | `chore/dns-providers-pin-bump` (workflow-registry) |
 | 5 | feat(wfctl): infra import-all bulk wrapper | Task 14, Task 15, Task 16, Task 17 | `feat/wfctl-infra-import-all` (workflow) |
 | 6 | feat(wfctl): relocate dns policy/gate/audit + dns-policy commands + OnBeforeAction hook | Task 18, Task 19, Task 20, Task 21, Task 22, Task 23, Task 24 | `feat/wfctl-dns-policy` (workflow) |
 | 7 | refactor(infra): strip libdns + admincli + dns packages + remove dns_record step | Task 25, Task 26, Task 27, Task 28 | `refactor/strip-dns-libdns` (workflow-plugin-infra) |
@@ -43,10 +44,11 @@
 
 **Dependencies:**
 - PRs 1, 2, 3, 4 parallel (no inter-dep).
-- PR 5 needs ≥1 of PRs 1-4 merged (for its e2e smoke against a real provider). Recommend after all 4 land.
-- PR 6 needs PRs 1-4 merged (its tests exercise EnumerateAll-backed driver paths).
+- PR 4.5 (workflow-registry manifest sweep) follows PRs 1-4 — batched manifest version pin updates for all 4 providers in one workflow-registry PR per `feedback_version_bump_immediate_merge.md` pattern.
+- PR 5 needs PRs 1-4 merged + tagged + PR 4.5 merged (for its e2e smoke against a real provider). Recommend after all 4 land + tags pushed + registry refreshed.
+- PR 6 needs PRs 1-4 merged + PR 5 merged (its tests exercise EnumerateAll-backed driver paths via `wfctl infra import-all`).
 - PR 7 needs PR 6 merged (relocates pkg destinations must exist first).
-- PR 8 needs PRs 1-5 merged (scenarios consume import-all + EnumerateAll). PR 8's stub-plugin work can begin in parallel; full scenario suite blocks until merge.
+- PR 8 needs PRs 1-5 merged (scenarios consume import-all + EnumerateAll). PR 8's stub-plugin scaffolding can begin in parallel with PR 6/7; full scenario suite blocks until PR 7 merge to confirm system shape.
 
 **Status:** Draft
 
@@ -129,7 +131,17 @@ func TestDOProvider_EnumerateAll_DNS_uninitialized(t *testing.T) {
 Run: `GOWORK=off go test -run 'TestDOProvider_EnumerateAll_DNS' ./internal/...`
 Expected: FAIL — `EnumerateAll: resource type "infra.dns" not supported`
 
-**Step 3: Commit failing test**
+**Step 3: Add compile-time interface assertion**
+
+In `internal/provider_enumerator_test.go` (or `provider.go` near the existing `Enumerator` assertion):
+
+```go
+var _ interfaces.EnumeratorAll = (*DOProvider)(nil)
+```
+
+`interfaces.EnumeratorAll` is the new (account-scoped) interface; `interfaces.Enumerator` is the tag-scoped one (separate method). Verify the exact interface name via `go doc github.com/GoCodeAlone/workflow/interfaces.EnumeratorAll` — if the canonical name differs, use the canonical name.
+
+**Step 4: Commit failing test**
 
 ```bash
 git add internal/provider_enumerator_test.go
@@ -152,11 +164,11 @@ case "infra.dns":
 
 **Step 2: Implement helper**
 
-Append to `internal/provider.go`:
+Append to `internal/provider.go` (mirror the existing `enumerateAllSpacesKeys` pagination pattern at lines 703-760):
 
 ```go
 // enumerateAllDNS paginates GET /v2/domains via godo's Domains.List using
-// ListOptions{Page,PerPage:200}; loop terminates when godo signals last page.
+// ListOptions{Page,PerPage:200}; loop terminates via godo's IsLastPage signal.
 // Each *ResourceOutput carries the zone name + ttl + zone_file for the
 // import-all path to feed into IaCProvider.Import.
 func (p *DOProvider) enumerateAllDNS(ctx context.Context) ([]*interfaces.ResourceOutput, error) {
@@ -179,15 +191,14 @@ func (p *DOProvider) enumerateAllDNS(ctx context.Context) ([]*interfaces.Resourc
                 Outputs:    outputs,
             })
         }
-        if resp == nil || resp.Links == nil || resp.Links.Pages == nil || resp.Links.Pages.Next == "" {
+        if resp == nil || resp.Links == nil || resp.Links.IsLastPage() {
             break
         }
-        page, perPage, err := resp.Links.CurrentPage()
+        page, err := resp.Links.CurrentPage() // godo returns (int, error) — single int
         if err != nil {
-            return nil, fmt.Errorf("digitalocean: EnumerateAll infra.dns: parse next page: %w", err)
+            return nil, fmt.Errorf("digitalocean: EnumerateAll infra.dns: parse current page: %w", err)
         }
         opt.Page = page + 1
-        _ = perPage
     }
     return all, nil
 }
@@ -285,28 +296,55 @@ Add Copilot reviewer per memory feedback (skip per memory `feedback_copilot_revi
 **Files:**
 - Test: `internal/iacserver_test.go` (modify; existing test file has IaC server scaffolding)
 
-**Step 1: Write failing test**
+**Step 0: Inspect actual cfProvider shape** (cycle-2 finding)
+
+Before writing code, the implementer runs `grep -n 'type cfProvider' internal/iacserver.go` to confirm the struct's exact fields. As of v0.x cfProvider has `dnsDriver *drivers.DNSDriver` + `domainDriver *drivers.DomainDriver` — there is NO `client` field. The new EnumerateAll path needs an account-level zone client; add it via dependency injection.
+
+**Step 1: Extend cfProvider w/ zoneLister field**
+
+In `internal/iacserver.go`, add a small interface + field to cfProvider:
 
 ```go
-func TestCfProvider_EnumerateAll_DNS_paginates(t *testing.T) {
+type zoneListerCF interface {
+    // ListZones returns the cloudflare-go v7 AutoPager iterator that
+    // exposes Next()/Current()/Err() over the account's zones.
+    ListZones(ctx context.Context, query zones.ZoneListParams, opts ...option.RequestOption) *pagination.V4PagePaginationArrayAutoPager[zones.Zone]
+}
+
+type cfProvider struct {
+    dnsDriver    *drivers.DNSDriver
+    domainDriver *drivers.DomainDriver
+    zones        zoneListerCF  // injected; concrete = (*cfsdk.Client).Zones
+}
+```
+
+`Initialize()` (existing) sets `p.zones = sdkClient.Zones` after credentials are wired.
+
+**Step 2: Write failing test**
+
+```go
+type fakeZoneLister struct{ items []zones.Zone }
+
+func (f *fakeZoneLister) ListZones(_ context.Context, _ zones.ZoneListParams, _ ...option.RequestOption) *pagination.V4PagePaginationArrayAutoPager[zones.Zone] {
+    return pagination.NewArrayAutoPagerFromSlice(f.items) // helper if cloudflare-go provides; else build a minimal stub matching the AutoPager API
+}
+
+func TestCfProvider_EnumerateAll_DNS(t *testing.T) {
     ctx := context.Background()
-    stub := &fakeCFClient{
-        zones: []zones.Zone{
-            {ID: "zid-1", Name: "alpha.test", Account: zones.ZoneAccount{ID: "acct-1"}},
-            {ID: "zid-2", Name: "beta.test", Account: zones.ZoneAccount{ID: "acct-1"}},
-        },
-    }
-    p := &cfProvider{client: stub}
+    p := &cfProvider{zones: &fakeZoneLister{items: []zones.Zone{
+        {ID: "zid-1", Name: "alpha.test", Account: zones.ZoneAccount{ID: "acct-1"}},
+        {ID: "zid-2", Name: "beta.test", Account: zones.ZoneAccount{ID: "acct-1"}},
+    }}}
     out, err := p.EnumerateAll(ctx, "infra.dns")
     if err != nil { t.Fatalf("EnumerateAll: %v", err) }
     if len(out) != 2 { t.Fatalf("want 2; got %d", len(out)) }
     if out[0].ProviderID != "zid-1" { t.Errorf("providerID[0] = %v", out[0].ProviderID) }
-    if out[0].Outputs["zone"] != "alpha.test" { t.Errorf("zone[0] = %v", out[0].Outputs["zone"]) }
-    if out[0].Outputs["account_id"] != "acct-1" { t.Errorf("account_id[0] = %v", out[0].Outputs["account_id"]) }
+    if out[0].Outputs["zone"] != "alpha.test" { t.Errorf("zone[0]") }
+    if out[0].Outputs["account_id"] != "acct-1" { t.Errorf("account_id[0]") }
 }
 ```
 
-Extend the existing `fakeCFClient` in the test file with a `zones []zones.Zone` field + `ListZones(ctx, *zones.ZoneListParams) iter.Seq2[zones.Zone, error]` method (matches cloudflare-go/v7 iterator pattern).
+If cloudflare-go does NOT expose a slice-based AutoPager constructor, the test stub implements just the methods cfProvider's EnumerateAll calls (`Next() bool`, `Current() Zone`, `Err() error`) — define a tiny `zonePager` interface in `internal/iacserver.go` that wraps both the real AutoPager and the test fake.
 
 **Step 2: Run failing test**
 
@@ -326,26 +364,25 @@ git commit -m "test(provider): add failing EnumerateAll infra.dns coverage"
 - Modify: `internal/iacserver.go` (add EnumerateAll method to cfProvider)
 - Modify: `internal/drivers/dns.go` (sdkClient ListZones method if not present)
 
-**Step 1: Add EnumerateAll to cfProvider**
+**Step 3: Add EnumerateAll to cfProvider using AutoPager iterator pattern**
 
 In `internal/iacserver.go`:
 
 ```go
-// EnumerateAll implements interfaces.Enumerator for infra.dns. Pages via
-// cloudflare-go's Zones().List iterator. Per-zone account_id captured for
-// downstream Import operations.
+// EnumerateAll implements interfaces.EnumeratorAll for infra.dns. Pages via
+// cloudflare-go/v7 Zones.ListAutoPaging, which returns a V4PagePaginationArrayAutoPager
+// exposing Next()/Current()/Err(). Per-zone account_id captured for downstream Import.
 func (p *cfProvider) EnumerateAll(ctx context.Context, resourceType string) ([]*interfaces.ResourceOutput, error) {
-    if p.client == nil {
+    if p.zones == nil {
         return nil, fmt.Errorf("cloudflare: EnumerateAll called on uninitialized provider")
     }
     if resourceType != "infra.dns" {
         return nil, fmt.Errorf("cloudflare: EnumerateAll: resource type %q not supported", resourceType)
     }
     var out []*interfaces.ResourceOutput
-    for zone, err := range p.client.ListZones(ctx, &zones.ZoneListParams{}) {
-        if err != nil {
-            return nil, fmt.Errorf("cloudflare: EnumerateAll infra.dns: %w", err)
-        }
+    pager := p.zones.ListZones(ctx, zones.ZoneListParams{}) // value, not pointer
+    for pager.Next() {
+        zone := pager.Current()
         out = append(out, &interfaces.ResourceOutput{
             ProviderID: zone.ID,
             Type:       "infra.dns",
@@ -356,21 +393,14 @@ func (p *cfProvider) EnumerateAll(ctx context.Context, resourceType string) ([]*
             },
         })
     }
+    if err := pager.Err(); err != nil {
+        return nil, fmt.Errorf("cloudflare: EnumerateAll infra.dns: %w", err)
+    }
     return out, nil
 }
 ```
 
-**Step 2: Add ListZones to sdkClient if not present**
-
-Check `internal/drivers/dns.go` for existing `ListZones` on `sdkClient`. If absent, add:
-
-```go
-func (c *sdkClient) ListZones(ctx context.Context, params *zones.ZoneListParams) iter.Seq2[zones.Zone, error] {
-    return c.api.Zones.ListAutoPaging(ctx, *params)
-}
-```
-
-(Matches cloudflare-go/v7 `*cloudflare.Client.Zones.ListAutoPaging` signature.)
+`zones.ListAutoPaging` returns `*pagination.V4PagePaginationArrayAutoPager[zones.Zone]` (verified in `cloudflare-go/v7/zones/zone.go`). The iterator uses `Next() bool / Current() Zone / Err() error` — NOT `iter.Seq2`. Verify the exact import path + return type at implementation start via `go doc cloudflare.com/v7/zones`.
 
 **Step 3: Run unit tests**
 
@@ -450,30 +480,43 @@ gh pr create --title "feat(provider): EnumerateAll for infra.dns" \
 **Files:**
 - Test: `internal/iacserver_test.go` (modify)
 
+**Step 0: Inspect actual go-namecheap-sdk types** (cycle-2 finding)
+
+Run `go doc github.com/namecheap/go-namecheap-sdk/v2/namecheap` and verify:
+- Response type is `DomainsGetListCommandResponse` (NOT `DomainsGetListResult`)
+- `DomainsService` has `GetList(args *DomainsGetListArgs) (*DomainsGetListCommandResponse, error)` — note: caller invokes via `client.Domains.GetList(...)` (subservice)
+- `DomainsGetListArgs` fields: `Page *int`, `PageSize *int` (pointers)
+- `Domain` struct fields: `Name string`, `IsOurDNS *bool` (pointer), `Expires *DateTime` (pointer)
+
+The test stub must mirror this shape exactly.
+
 **Step 1: Failing test**
 
 ```go
+func ptrBool(b bool) *bool { return &b }
+
+type stubNCDomains struct{ resp *namecheap.DomainsGetListCommandResponse }
+func (s *stubNCDomains) GetList(_ *namecheap.DomainsGetListArgs) (*namecheap.DomainsGetListCommandResponse, error) {
+    return s.resp, nil
+}
+
 func TestNcProvider_EnumerateAll_DNS(t *testing.T) {
     ctx := context.Background()
-    stub := &fakeNCClient{
-        getList: &namecheap.DomainsGetListResult{
-            Domains: []namecheap.Domain{
-                {Name: "alpha.test", IsUsingOurDns: true, Expires: "2027-01-01"},
-                {Name: "beta.test", IsUsingOurDns: false, Expires: "2026-08-15"},
-            },
-        },
+    domains := []namecheap.Domain{
+        {Name: "alpha.test", IsOurDNS: ptrBool(true)},
+        {Name: "beta.test",  IsOurDNS: ptrBool(false)},
     }
-    p := &ncProvider{client: stub}
+    p := &ncProvider{client: &stubNCClient{domains: &stubNCDomains{resp: &namecheap.DomainsGetListCommandResponse{Domains: &domains}}}}
     out, err := p.EnumerateAll(ctx, "infra.dns")
     if err != nil { t.Fatalf("EnumerateAll: %v", err) }
     if len(out) != 2 { t.Fatalf("want 2; got %d", len(out)) }
-    if out[0].ProviderID != "alpha.test" { t.Errorf("providerID[0] = %v", out[0].ProviderID) }
-    if out[0].Outputs["is_using_our_dns"].(bool) != true { t.Errorf("is_using_our_dns[0]") }
-    if out[1].Outputs["is_using_our_dns"].(bool) != false { t.Errorf("is_using_our_dns[1]") }
+    if out[0].ProviderID != "alpha.test" { t.Errorf("providerID[0]") }
+    if out[0].Outputs["is_our_dns"] != true { t.Errorf("is_our_dns[0]") }
+    if out[1].Outputs["is_our_dns"] != false { t.Errorf("is_our_dns[1]") }
 }
 ```
 
-Extend `fakeNCClient` test helper with a `GetList(*namecheap.DomainsGetListArgs)` method. Reference `go-namecheap-sdk` API for exact arg type.
+`stubNCClient` mirrors the SDK's nested-subservice shape: `Domains` field returning a `*stubNCDomains`. ncProvider's `client` field is whatever interface today permits calls of the form `p.client.Domains.GetList(...)` — verify at implementation time and adapt the test scaffolding accordingly.
 
 **Step 2: Verify failure + commit**
 
@@ -489,13 +532,13 @@ git commit -m "test(provider): failing EnumerateAll infra.dns coverage"
 **Files:**
 - Modify: `internal/iacserver.go`
 
-**Step 1: Implementation**
+**Step 2: Implementation**
 
 ```go
-// EnumerateAll implements interfaces.Enumerator for infra.dns. Uses
-// namecheap-go-sdk Domains.GetList; paginates via PageSize/Page args.
-// is_using_our_dns surfaced so operators can identify zones registered
-// at NC but with authority pointed elsewhere.
+// EnumerateAll implements interfaces.EnumeratorAll for infra.dns. Uses
+// namecheap-go-sdk client.Domains.GetList; paginates via PageSize/Page args
+// (both *int). is_our_dns surfaced so operators can identify zones
+// registered at NC but with authority pointed elsewhere.
 func (p *ncProvider) EnumerateAll(ctx context.Context, resourceType string) ([]*interfaces.ResourceOutput, error) {
     if p.client == nil {
         return nil, fmt.Errorf("namecheap: EnumerateAll called on uninitialized provider")
@@ -505,31 +548,33 @@ func (p *ncProvider) EnumerateAll(ctx context.Context, resourceType string) ([]*
     }
     var out []*interfaces.ResourceOutput
     page := 1
+    pageSize := 100
     for {
-        resp, err := p.client.GetList(&namecheap.DomainsGetListArgs{Page: page, PageSize: 100})
+        resp, err := p.client.Domains.GetList(&namecheap.DomainsGetListArgs{Page: &page, PageSize: &pageSize})
         if err != nil {
             return nil, fmt.Errorf("namecheap: EnumerateAll infra.dns: page=%d: %w", page, err)
         }
-        if resp == nil || len(resp.Domains) == 0 {
+        if resp == nil || resp.Domains == nil || len(*resp.Domains) == 0 {
             break
         }
-        for _, d := range resp.Domains {
+        for _, d := range *resp.Domains {
+            outputs := map[string]any{"zone": d.Name}
+            if d.IsOurDNS != nil { outputs["is_our_dns"] = *d.IsOurDNS }
+            if d.Expires != nil  { outputs["expires"] = d.Expires.Format(time.RFC3339) }
             out = append(out, &interfaces.ResourceOutput{
                 ProviderID: d.Name,
                 Type:       "infra.dns",
-                Outputs: map[string]any{
-                    "zone":              d.Name,
-                    "is_using_our_dns":  d.IsUsingOurDns,
-                    "expires":           d.Expires,
-                },
+                Outputs:    outputs,
             })
         }
-        if len(resp.Domains) < 100 { break } // last page
+        if len(*resp.Domains) < pageSize { break }
         page++
     }
     return out, nil
 }
 ```
+
+`namecheap.DateTime` is the SDK's wrapper around `time.Time` (verify the formatter method via `go doc`). Use whatever the SDK exposes (`.Format`, `.Time()`, or direct field) — fall back to `fmt.Sprintf("%v", d.Expires)` if needed but prefer the typed accessor.
 
 **Step 2: Tests + commit**
 
@@ -575,6 +620,21 @@ gh pr create --title "feat(provider): EnumerateAll for infra.dns" --body "Implem
 
 **Repo:** `/Users/jon/workspace/workflow-plugin-hover`
 **Branch:** `feat/dns-enumerate-all-2026-05-26T1900`
+
+**Prerequisite (cycle-2 finding C4)**: local working tree must be synced to origin/main before starting. PR #26 (pkg/hoverclient extraction; tag v0.3.0) is merged remotely but local checkout may be on the pre-extraction `master` branch.
+
+```bash
+cd /Users/jon/workspace/workflow-plugin-hover
+git fetch origin
+git checkout main
+git pull --ff-only origin main
+git tag | grep v0.3.0    # confirm tag present locally
+ls pkg/hoverclient/      # confirm package directory present
+```
+
+Both must succeed before Task 10 proceeds.
+
+**Module-path note (cycle-2 finding C4)**: `pkg/hoverclient` is a SUBPATH inside the single `github.com/GoCodeAlone/workflow-plugin-hover` Go module — NOT a separate Go module with its own `go.mod`. Consumers import it as `github.com/GoCodeAlone/workflow-plugin-hover/pkg/hoverclient` and resolve to the PARENT module's tag (e.g. `@v0.4.0` after Task 11 tags the parent module). Task 11 below tags the parent module at `v0.4.0`, NOT a subpath tag.
 
 ### Task 10: Add ListDomains method to pkg/hoverclient
 
@@ -643,29 +703,34 @@ git add pkg/hoverclient/client.go pkg/hoverclient/client_test.go
 git commit -m "feat(client): add ListDomains for account-level enumeration"
 ```
 
-### Task 11: Bump pkg/hoverclient tag
+### Task 11: Tag parent module v0.4.0
 
 **Files:**
-- (none directly; tag operation)
+- (none directly; tag operation against the PARENT `workflow-plugin-hover` Go module — not a subpath tag)
 
-**Step 1: Tag + push**
+**Step 1: Merge Task 10 PR first**
+
+Task 10 added `ListDomains` to `pkg/hoverclient/client.go`. That PR must be MERGED to main with CI green before tagging. Task 12 cannot proceed until v0.4.0 is published.
+
+This task is operationally separate from Tasks 10 + 12 — it happens BETWEEN them, after Task 10 merges and before Task 12's pin bump. In PR terms, Task 11 is a tag operation, not a PR. The plan's PR 4 row in the Scope Manifest covers Tasks 10 + 12 (one PR per Go module change); Task 11 is the inter-task tag step.
+
+**Step 2: Tag + push**
 
 ```bash
-# Verify CI green on main first
 git fetch --tags
-NEXT_TAG="v0.4.0" # minor bump for new exported method
-git tag "$NEXT_TAG"
-git push origin "$NEXT_TAG"
+git checkout main && git pull --ff-only
+git tag v0.4.0
+git push origin v0.4.0
 ```
 
-**Step 2: Confirm tag visible to consumers**
+**Step 3: Confirm tag visible to consumers**
 
 ```bash
 git ls-remote --tags origin | grep v0.4.0
 # Expect: ref/tags/v0.4.0 hash present
 ```
 
-This tag must land BEFORE Task 12 begins so the plugin can pin the new client version.
+Consumers will import as `github.com/GoCodeAlone/workflow-plugin-hover/pkg/hoverclient` and resolve to module tag v0.4.0.
 
 ### Task 12: Implement EnumerateAll on hoverProvider
 
@@ -680,8 +745,10 @@ This tag must land BEFORE Task 12 begins so the plugin can pin the new client ve
 func TestHoverProvider_EnumerateAll_DNS(t *testing.T) {
     stub := &fakeHoverClient{
         domains: []hoverclient.Domain{
-            {ID: "d-1", DomainName: "alpha.test", ExpiresAt: "2027-01-01"},
-            {ID: "d-2", DomainName: "beta.test", ExpiresAt: "2026-12-01"},
+            // hoverclient.Domain field is `Name string` (tagged json:"domain_name"),
+            // NOT a separate DomainName field. Verified pkg/hoverclient/client.go.
+            {ID: "d-1", Name: "alpha.test"},
+            {ID: "d-2", Name: "beta.test"},
         },
     }
     p := &hoverProvider{client: stub}
@@ -689,11 +756,11 @@ func TestHoverProvider_EnumerateAll_DNS(t *testing.T) {
     if err != nil { t.Fatalf("EnumerateAll: %v", err) }
     if len(out) != 2 { t.Fatalf("want 2; got %d", len(out)) }
     if out[0].ProviderID != "alpha.test" { t.Errorf("providerID[0] = %v", out[0].ProviderID) }
-    if out[0].Outputs["expires_at"] != "2027-01-01" { t.Errorf("expires_at[0]") }
+    if out[0].Outputs["zone"] != "alpha.test" { t.Errorf("zone[0]") }
 }
 ```
 
-Extend `fakeHoverClient` with `ListDomains(ctx) ([]Domain, error)` method.
+Extend `fakeHoverClient` with `ListDomains(ctx context.Context) ([]hoverclient.Domain, error)` method. If pkg/hoverclient also exposes `ExpiresAt` or similar on Domain, add it to outputs after verifying the actual field via `go doc github.com/GoCodeAlone/workflow-plugin-hover/pkg/hoverclient.Domain`.
 
 **Step 2: Verify fail; bump pin; implement**
 
@@ -717,14 +784,17 @@ func (p *hoverProvider) EnumerateAll(ctx context.Context, resourceType string) (
     if err != nil { return nil, fmt.Errorf("hover: EnumerateAll infra.dns: %w", err) }
     out := make([]*interfaces.ResourceOutput, 0, len(domains))
     for _, d := range domains {
+        outputs := map[string]any{
+            "zone":      d.Name,       // hoverclient.Domain field is Name (json:"domain_name")
+            "domain_id": d.ID,
+        }
+        // ExpiresAt / other fields: surface them ONLY after confirming via `go doc`
+        // that the hoverclient.Domain struct exposes them. Cycle-2 adversarial showed
+        // memory references that didn't match the actual struct.
         out = append(out, &interfaces.ResourceOutput{
-            ProviderID: d.DomainName,
+            ProviderID: d.Name,
             Type:       "infra.dns",
-            Outputs: map[string]any{
-                "zone":       d.DomainName,
-                "expires_at": d.ExpiresAt,
-                "domain_id":  d.ID,
-            },
+            Outputs:    outputs,
         })
     }
     return out, nil
@@ -767,6 +837,51 @@ git push -u origin feat/dns-enumerate-all-2026-05-26T1900
 gh pr create --title "feat(provider): ListDomains + EnumerateAll for infra.dns" \
   --body "Adds pkg/hoverclient.ListDomains calling GET /api/domains; implements IaCProviderEnumerator.EnumerateAll(\"infra.dns\") via the new method. Bumps pkg/hoverclient to v0.4.0. Live test env-gated. Part of cross-repo cascade docs/plans/2026-05-26-dns-provider-contract.md (workflow-plugin-infra)." \
   --base main
+```
+
+---
+
+## PR 4.5 — workflow-registry: pin-bump manifests for DO/CF/NC/Hover
+
+**Repo:** `/Users/jon/workspace/workflow-registry`
+**Branch:** `chore/dns-providers-pin-bump-2026-05-26T1900`
+
+**Wait for:** PRs 1, 2, 3, 4 merged + tags published in respective repos.
+
+### Task 13.5: Pin-bump 4 provider manifests + admin-merge
+
+Per `feedback_version_bump_immediate_merge.md`: version-pin manifest changes auto-merge in same turn. Batch all 4 provider bumps into one PR.
+
+**Files:**
+- Modify: `manifests/workflow-plugin-digitalocean.yaml` (version pin)
+- Modify: `manifests/workflow-plugin-cloudflare.yaml`
+- Modify: `manifests/workflow-plugin-namecheap.yaml`
+- Modify: `manifests/workflow-plugin-hover.yaml`
+
+**Step 1: Bump pins to each provider's new tagged version**
+
+For each provider manifest, update the `version:` field to the tag published after its respective PR (1-4) landed. Exact version numbers determined at PR-landing time; no hardcoded values here.
+
+**Step 2: Validate manifests**
+
+```bash
+wfctl plugin registry-validate manifests/
+# Expect: all 4 manifests valid
+```
+
+**Step 3: Commit + push + auto-merge PR**
+
+```bash
+git add manifests/
+git commit -m "chore(manifest): pin-bump DO/CF/NC/Hover providers for EnumerateAll infra.dns"
+git push -u origin chore/dns-providers-pin-bump-2026-05-26T1900
+gh pr create --title "chore(manifest): pin-bump 4 DNS providers for EnumerateAll cascade" \
+  --body "Pin-bumps four manifests after the EnumerateAll(\"infra.dns\") cascade lands. Part of docs/plans/2026-05-26-dns-provider-contract.md in workflow-plugin-infra." \
+  --base main
+# Per feedback_version_bump_immediate_merge: admin-merge in same turn
+sleep 5
+PR=$(gh pr view chore/dns-providers-pin-bump-2026-05-26T1900 --json number -q .number)
+gh pr merge "$PR" --squash --admin --delete-branch
 ```
 
 ---
@@ -823,7 +938,7 @@ In `cmd/wfctl/infra.go` (next to `runInfraImport` at line 1021):
 ```go
 func runInfraImportAll(args []string) error {
     fs := flag.NewFlagSet("infra import-all", flag.ContinueOnError)
-    var configFile, envName, providerName, resourceType, pluginDirFlag string
+    var configFile, envName, providerName, resourceType, pluginDirFlag, outputPath string
     var dryRun bool
     fs.StringVar(&configFile, "config", "", "Config file")
     fs.StringVar(&configFile, "c", "", "Config file (short)")
@@ -832,13 +947,17 @@ func runInfraImportAll(args []string) error {
     fs.StringVar(&resourceType, "type", "", "Resource type (required), e.g. infra.dns")
     fs.BoolVar(&dryRun, "dry-run", false, "List zones without persisting")
     fs.StringVar(&pluginDirFlag, "plugin-dir", "", "Plugin directory")
+    fs.StringVar(&outputPath, "output", "", "Optional: write imported state to this file (in addition to state backend)")
+    fs.StringVar(&outputPath, "o", "", "Output path (short)")
     if err := fs.Parse(args); err != nil { return err }
     if providerName == "" { return fmt.Errorf("import-all requires --provider") }
     if resourceType == "" { return fmt.Errorf("import-all requires --type (e.g. infra.dns)") }
-    // TODO: dispatch
+    // TODO: dispatch via runInfraImportAllWithDeps (Task 15)
     return nil
 }
 ```
+
+`--output`/`-o` is consumed by the scenarios in Tasks 31-32 to capture per-run state for cross-provider diffing without re-reading the state backend.
 
 Add `case "import-all"` to runInfra switch (around line 76):
 
@@ -889,10 +1008,12 @@ func TestRunInfraImportAll_dispatch(t *testing.T) {
 
 Factor the dispatch core into `runInfraImportAllWithDeps(ctx, provider, store, resourceType, dryRun) (int, error)` for testability; `runInfraImportAll` is the CLI wrapper that resolves provider + store from config.
 
+Use the package-private `infraStateStore` interface (the same type returned by `resolveStateStore` — verify via `grep -n 'type infraStateStore' cmd/wfctl/*.go`). DO NOT use `interfaces.IaCStateStore` — that's a different (broader) interface defined in `workflow/interfaces/iac_state.go` and the package-private wfctl helper does not satisfy it.
+
 **Step 2: Implement core**
 
 ```go
-func runInfraImportAllWithDeps(ctx context.Context, provider interfaces.IaCProvider, store interfaces.IaCStateStore, resourceType string, dryRun bool) (int, error) {
+func runInfraImportAllWithDeps(ctx context.Context, provider interfaces.IaCProvider, store infraStateStore, resourceType string, dryRun bool) (int, error) {
     enumerator, ok := provider.(interfaces.Enumerator)
     if !ok { return 0, fmt.Errorf("provider does not implement EnumerateAll") }
     outputs, err := enumerator.EnumerateAll(ctx, resourceType)
@@ -932,13 +1053,23 @@ func runInfraImportAllWithDeps(ctx context.Context, provider interfaces.IaCProvi
 
 In `runInfraImportAll`:
 ```go
-provider, closer, err := resolveIaCProvider(ctx, providerType, providerCfg)
+ctx := context.Background()
+provider, closer, err := resolveIaCProvider(ctx, providerName, /* providerCfg from configFile */)
+if err != nil { return err }
 defer closer.Close()
-store, err := resolveStateStore(cfgFile, envName)
+store, err := resolveStateStore(configFile, envName)
+if err != nil { return err }
 n, err := runInfraImportAllWithDeps(ctx, provider, store, resourceType, dryRun)
+if outputPath != "" {
+    if werr := dumpStateToFile(ctx, store, outputPath); werr != nil {
+        fmt.Fprintf(os.Stderr, "warning: --output dump failed: %v\n", werr)
+    }
+}
 fmt.Printf("imported %d zones\n", n)
 return err
 ```
+
+`dumpStateToFile` walks the just-saved state via `store.ListResources` (the package-private interface either already has it or needs a small extension — verify at impl time) and writes a JSON snapshot to `outputPath`. The variable name is `configFile` (matches Task 14's flag binding), not `cfgFile`.
 
 ```bash
 GOWORK=off go test ./cmd/wfctl/...
@@ -1337,7 +1468,7 @@ git add cmd/wfctl/infra.go cmd/wfctl/infra_apply_test.go
 git commit -m "feat(wfctl): wire dns-gate as OnBeforeAction for infra.dns resources during apply"
 ```
 
-### Task 24: Push branch + open PR
+### Task 24: Runtime-launch validation + push branch + open PR
 
 **Files:**
 - (none directly)
@@ -1348,7 +1479,23 @@ git commit -m "feat(wfctl): wire dns-gate as OnBeforeAction for infra.dns resour
 GOWORK=off go test ./...
 ```
 
-**Step 2: Push + PR**
+**Step 2: Build wfctl + smoke-test new commands (runtime-launch-validation)**
+
+```bash
+GOWORK=off go build -o /tmp/wfctl-smoke ./cmd/wfctl
+/tmp/wfctl-smoke dns-policy --help
+# Expect: exit 0; help text lists show/set/transfer-ownership/drift subcommands
+/tmp/wfctl-smoke infra import-all --help
+# Expect: exit 0; help text shows --provider --type --output flags
+/tmp/wfctl-smoke dns-policy show
+# Expect: exit nonzero with "requires --zone" error message
+```
+
+If `docker compose` integration smoke is available locally (workflow's existing `make smoke` target or similar), run it. Otherwise the binary-level help+error smoke above satisfies the gate for a CLI-class change.
+
+**Rollback**: revert this PR; pre-Phase-3b workflow-plugin-infra still has its infra-dns plugin cliCommand intact, so admincli flows continue working via the old surface. No state migration to undo on rollback because the audit-trail migration is additive (old path retained for one release cycle).
+
+**Step 3: Push + PR**
 
 ```bash
 git push -u origin feat/wfctl-dns-policy-2026-05-26T1900
@@ -1540,12 +1687,14 @@ Design: docs/plans/2026-05-26-dns-provider-contract-design.md" \
 
 **Wait for**: PR 5 + PR 6 + PR 7 merged.
 
+**Cycle-2 finding I6**: scenarios use canonical `scenarios/<id>-<name>/` layout with `config/` + `test/` subdirs, NOT a flat `dns/` directory at repo root. Highest existing scenario ID is 88 (`88-iac-dns-replay-migration`). New DNS scenarios use IDs 89/90/91. Stub plugin (shared by all three) lives at `scenarios/lib/dns-stub-plugin/`.
+
 ### Task 29: Build stub IaCProvider gRPC plugin
 
 **Files:**
-- Create: `dns/stub-plugin/main.go`
-- Create: `dns/stub-plugin/fixtures/example.yaml`
-- Create: `dns/stub-plugin/go.mod`
+- Create: `scenarios/lib/dns-stub-plugin/main.go`
+- Create: `scenarios/lib/dns-stub-plugin/fixtures/example.yaml`
+- Create: `scenarios/lib/dns-stub-plugin/go.mod` (or use parent go.work if applicable)
 
 **Step 1: Scaffold stub plugin**
 
@@ -1599,7 +1748,7 @@ func main() {
 **Step 2: Example fixture**
 
 ```yaml
-# dns/stub-plugin/fixtures/example.yaml
+# scenarios/lib/dns-stub-plugin/fixtures/example.yaml
 zones:
   - id: alpha.test
     zone: alpha.test
@@ -1612,23 +1761,34 @@ zones:
 **Step 3: Build + commit**
 
 ```bash
-cd dns/stub-plugin && GOWORK=off go build .
-cd ../..
-git add dns/stub-plugin/
+cd scenarios/lib/dns-stub-plugin && GOWORK=off go build .
+cd ../../..
+git add scenarios/lib/dns-stub-plugin/
 git commit -m "feat(scenarios): stub IaCProvider gRPC plugin for DNS orchestration tests"
 ```
 
-### Task 30: Scenario 1 — import-export roundtrip
+### Task 30: Scenario 89 — dns-import-export-roundtrip
 
 **Files:**
-- Create: `dns/import-export-roundtrip/config.yaml`
-- Create: `dns/import-export-roundtrip/expected-state.json`
-- Create: `dns/import-export-roundtrip/run.sh`
+- Create: `scenarios/89-dns-import-export-roundtrip/scenario.yaml`
+- Create: `scenarios/89-dns-import-export-roundtrip/config/app.yaml`
+- Create: `scenarios/89-dns-import-export-roundtrip/test/run.sh`
 
-**Step 1: Scenario config**
+**Step 1: scenario.yaml + config**
 
 ```yaml
-# dns/import-export-roundtrip/config.yaml
+# scenarios/89-dns-import-export-roundtrip/scenario.yaml
+id: 89-dns-import-export-roundtrip
+title: DNS import-export roundtrip
+description: Import zone via wfctl infra import-all then plan; assert NoOp
+componentsRequired:
+  - workflow >= 0.65.0
+  - workflow-plugin-infra >= 1.0.0
+runtime: local
+```
+
+```yaml
+# scenarios/89-dns-import-export-roundtrip/config/app.yaml
 modules:
   - name: stub
     type: iac.provider.stub
@@ -1640,61 +1800,72 @@ resources:
       domain: alpha.test
 ```
 
-**Step 2: Run script**
+**Step 2: test/run.sh**
 
 ```bash
 #!/usr/bin/env bash
 set -euo pipefail
-# Build stub plugin
-go build -o /tmp/dns-stub ../stub-plugin/
+PASS=0; FAIL=0; SKIP=0
+# Build stub plugin from shared lib
+go build -o /tmp/dns-stub ../../lib/dns-stub-plugin/
 # wfctl invocation: import-all then plan, assert plan is no-op
-wfctl --plugin-dir=/tmp infra import-all --config=config.yaml --provider=stub --type=infra.dns
-wfctl --plugin-dir=/tmp infra plan --config=config.yaml > /tmp/plan.txt
-grep -q "No changes" /tmp/plan.txt || { echo "FAIL: plan was not NoOp"; exit 1; }
-echo "PASS: import → plan NoOp"
+if wfctl --plugin-dir=/tmp infra import-all --config=../config/app.yaml --provider=stub --type=infra.dns; then PASS=$((PASS+1)); else FAIL=$((FAIL+1)); fi
+if wfctl --plugin-dir=/tmp infra plan --config=../config/app.yaml > /tmp/plan.txt; then PASS=$((PASS+1)); else FAIL=$((FAIL+1)); fi
+if grep -q "No changes" /tmp/plan.txt; then PASS=$((PASS+1)); else FAIL=$((FAIL+1)); fi
+echo "PASS=$PASS FAIL=$FAIL SKIP=$SKIP"
+[ $FAIL -eq 0 ]
 ```
+
+PASS/FAIL/SKIP counter pattern matches existing scenarios (e.g., 64, 72).
 
 **Step 3: Commit**
 
 ```bash
-chmod +x dns/import-export-roundtrip/run.sh
-git add dns/import-export-roundtrip/
-git commit -m "feat(scenarios): import-export roundtrip — assert imported state planar NoOp"
+chmod +x scenarios/89-dns-import-export-roundtrip/test/run.sh
+git add scenarios/89-dns-import-export-roundtrip/
+git commit -m "feat(scenarios): 89 dns-import-export-roundtrip — import then plan NoOp"
 ```
 
-### Task 31: Scenario 2 — cross-provider transfer
+### Task 31: Scenario 90 — dns-cross-provider-transfer
 
 **Files:**
-- Create: `dns/cross-provider-transfer/config-source.yaml` (source: stub-A)
-- Create: `dns/cross-provider-transfer/config-target.yaml` (target: stub-B)
-- Create: `dns/cross-provider-transfer/run.sh`
-- Create: `dns/cross-provider-transfer/lossiness.yaml`
+- Create: `scenarios/90-dns-cross-provider-transfer/scenario.yaml`
+- Create: `scenarios/90-dns-cross-provider-transfer/config/source.yaml` (provider: stub-A)
+- Create: `scenarios/90-dns-cross-provider-transfer/config/target.yaml` (provider: stub-B)
+- Create: `scenarios/90-dns-cross-provider-transfer/config/lossiness.yaml`
+- Create: `scenarios/90-dns-cross-provider-transfer/test/run.sh`
+- Create: `scenarios/90-dns-cross-provider-transfer/test/verify-transfer.py`
 
 **Step 1: Two stub providers**
 
 Configure two stub provider instances (stub-A as DO equivalent, stub-B as CF equivalent). Each loads same record set via fixture.
 
-**Step 2: Run script**
+**Step 2: test/run.sh**
 
 ```bash
 #!/usr/bin/env bash
 set -euo pipefail
-# Import from source
-wfctl infra import-all --config=config-source.yaml --provider=stub-A --type=infra.dns -o /tmp/source-state.json
-# Translate: rewrite provider field to stub-B
+PASS=0; FAIL=0; SKIP=0
+# Import from source via --output flag
+wfctl infra import-all --config=../config/source.yaml --provider=stub-A --type=infra.dns --output=/tmp/source-state.json && PASS=$((PASS+1)) || FAIL=$((FAIL+1))
+# Translate state: rewrite provider field to stub-B for re-apply
 jq '.resources[].provider = "stub-B"' /tmp/source-state.json > /tmp/target-state.json
-# Apply to target
-wfctl infra apply --config=config-target.yaml --state-file=/tmp/target-state.json
+# Apply to target (using --state-file if wfctl supports state-file import for apply; else use a config-driven import path)
+wfctl infra apply --config=../config/target.yaml --state-file=/tmp/target-state.json && PASS=$((PASS+1)) || FAIL=$((FAIL+1))
 # Read back from target
-wfctl infra import-all --config=config-target.yaml --provider=stub-B --type=infra.dns -o /tmp/roundtrip-state.json
+wfctl infra import-all --config=../config/target.yaml --provider=stub-B --type=infra.dns --output=/tmp/roundtrip-state.json && PASS=$((PASS+1)) || FAIL=$((FAIL+1))
 # Assert (type, name, data, ttl) equality per record per zone, EXCLUDING fields in lossiness.yaml
-python3 ../verify-transfer.py /tmp/source-state.json /tmp/roundtrip-state.json lossiness.yaml
+python3 ./verify-transfer.py /tmp/source-state.json /tmp/roundtrip-state.json ../config/lossiness.yaml && PASS=$((PASS+1)) || FAIL=$((FAIL+1))
+echo "PASS=$PASS FAIL=$FAIL SKIP=$SKIP"
+[ $FAIL -eq 0 ]
 ```
+
+Note: `--output` flag is the one added in Task 14 (cycle-2 finding C5). If `wfctl infra apply --state-file=…` is not yet a supported flag, replace step 2 with a config-driven apply that consumes the source-state.json via a state-backend import step. Verify wfctl's apply flag surface at implementation start.
 
 **Step 3: Lossiness charter**
 
 ```yaml
-# dns/cross-provider-transfer/lossiness.yaml
+# scenarios/90-dns-cross-provider-transfer/config/lossiness.yaml
 exclude:
   - {provider: cloudflare, record_type: "*",   field: proxied}
   - {provider: namecheap,  record_type: "*",   field: email_type}
@@ -1711,21 +1882,23 @@ matrix: [A, AAAA, CNAME, MX, TXT, SRV, CAA]   # NS excluded (apex provider-manag
 **Step 4: Commit**
 
 ```bash
-chmod +x dns/cross-provider-transfer/run.sh
-git add dns/cross-provider-transfer/ scripts/verify-transfer.py
-git commit -m "feat(scenarios): cross-provider transfer with lossiness charter (per-record-type exclusions)"
+chmod +x scenarios/90-dns-cross-provider-transfer/test/run.sh
+git add scenarios/90-dns-cross-provider-transfer/
+git commit -m "feat(scenarios): 90 dns-cross-provider-transfer with lossiness charter (per-record-type exclusions)"
 ```
 
-### Task 32: Scenario 3 — delegation + open PR
+### Task 32: Scenario 91 — dns-delegation + scenarios.json registration + open PR
 
 **Files:**
-- Create: `dns/delegation/config.yaml` (two providers, parent + child)
-- Create: `dns/delegation/run.sh`
+- Create: `scenarios/91-dns-delegation/scenario.yaml`
+- Create: `scenarios/91-dns-delegation/config/app.yaml` (two providers, parent + child)
+- Create: `scenarios/91-dns-delegation/test/run.sh`
+- Modify: `scenarios.json` (register all three new scenarios: 89, 90, 91)
 
 **Step 1: Two-zone config**
 
 ```yaml
-# dns/delegation/config.yaml — parent zone at stub-A with NS delegation; child zone at stub-B
+# scenarios/91-dns-delegation/config/app.yaml — parent zone at stub-A with NS delegation; child zone at stub-B
 modules:
   - {name: stub-A, type: iac.provider.stub}
   - {name: stub-B, type: iac.provider.stub}
@@ -1749,39 +1922,45 @@ resources:
         - {type: CNAME, name: www,  data: child.example.test, ttl: 300}
 ```
 
-**Step 2: Run script**
+**Step 2: test/run.sh**
 
 ```bash
 #!/usr/bin/env bash
 set -euo pipefail
+PASS=0; FAIL=0; SKIP=0
 # Single apply: both providers, both zones
-wfctl infra apply --config=config.yaml
-# Roundtrip: import-all each provider, assert delegation NS present at parent + child records present at child
-wfctl infra import-all --config=config.yaml --provider=stub-A --type=infra.dns -o /tmp/parent-state.json
-wfctl infra import-all --config=config.yaml --provider=stub-B --type=infra.dns -o /tmp/child-state.json
-jq -e '.resources[] | select(.name=="parent-zone") | .config.records[] | select(.type=="NS" and .name=="child.example.test")' /tmp/parent-state.json
-jq -e '.resources[] | select(.name=="child-zone") | .config.records[] | length >= 2' /tmp/child-state.json
-echo "PASS: delegation NS at parent + records at child intact"
+wfctl infra apply --config=../config/app.yaml && PASS=$((PASS+1)) || FAIL=$((FAIL+1))
+# Roundtrip: import-all each provider, assert delegation NS at parent + child records intact
+wfctl infra import-all --config=../config/app.yaml --provider=stub-A --type=infra.dns --output=/tmp/parent-state.json && PASS=$((PASS+1)) || FAIL=$((FAIL+1))
+wfctl infra import-all --config=../config/app.yaml --provider=stub-B --type=infra.dns --output=/tmp/child-state.json && PASS=$((PASS+1)) || FAIL=$((FAIL+1))
+jq -e '.resources[] | select(.name=="parent-zone") | .config.records[] | select(.type=="NS" and .name=="child.example.test")' /tmp/parent-state.json && PASS=$((PASS+1)) || FAIL=$((FAIL+1))
+jq -e '.resources[] | select(.name=="child-zone") | .config.records[] | length >= 2' /tmp/child-state.json && PASS=$((PASS+1)) || FAIL=$((FAIL+1))
+echo "PASS=$PASS FAIL=$FAIL SKIP=$SKIP"
+[ $FAIL -eq 0 ]
 ```
 
-**Step 3: Push + open PR**
+**Step 3: Register in scenarios.json**
+
+Add entries for IDs 89, 90, 91 to the `scenarios` map in `scenarios.json` (mirror the existing entry shape used by scenarios 80-88; check structure at `cat scenarios.json | jq '.scenarios | to_entries[-3:]'`).
+
+**Step 4: Push + open PR**
 
 ```bash
-chmod +x dns/delegation/run.sh
-git add dns/delegation/
-git commit -m "feat(scenarios): delegation — parent NS + child records across two providers (single apply)"
+chmod +x scenarios/91-dns-delegation/test/run.sh
+git add scenarios/91-dns-delegation/ scenarios.json
+git commit -m "feat(scenarios): 91 dns-delegation + register 89/90/91 in scenarios.json"
 git push -u origin feat/dns-orchestration-2026-05-26T1900
 
-gh pr create --title "feat(scenarios): DNS orchestration tests + stub provider plugin" \
-  --body "Phase 4 of cross-repo DNS cascade. Three scenarios under dns/:
+gh pr create --title "feat(scenarios): 3 DNS orchestration scenarios (89/90/91) + stub provider plugin" \
+  --body "Phase 4 of cross-repo DNS cascade. Three new scenarios:
 
-- import-export-roundtrip: import zone then plan; assert NoOp
-- cross-provider-transfer: import from source provider; apply to target; assert (type, name, data, ttl) parity per the lossiness charter
-- delegation: parent zone at one provider with NS records pointing to second provider's nameservers; child zone at second provider; single wfctl infra apply manages both
+- 89-dns-import-export-roundtrip: import zone then plan; assert NoOp
+- 90-dns-cross-provider-transfer: import from source provider; apply to target; assert (type, name, data, ttl) parity per the lossiness charter (per-record-type field exclusions)
+- 91-dns-delegation: parent zone at one provider with NS records pointing to second provider's nameservers; child zone at second provider; single wfctl infra apply manages both
 
-Stub IaCProvider gRPC plugin at dns/stub-plugin/ serves canned EnumerateAll/Import from YAML fixtures — runs locally without cloud creds.
+Stub IaCProvider gRPC plugin at scenarios/lib/dns-stub-plugin/ serves canned EnumerateAll/Import from YAML fixtures — runs locally without cloud creds.
 
-Multi-component validation: scenarios exercise real wfctl + real plugin loading via stub plugin processes. Memory-mocked HTTP is insufficient for the IaC strict-contract path.
+Multi-component validation: scenarios exercise real wfctl + real plugin loading via stub plugin processes. HTTP mocks are insufficient for the IaC strict-contract path.
 
 Pattern precedent for multi-provider single-config: scenario 66-iac-multi-cloud.
 
@@ -1804,3 +1983,4 @@ Design: workflow-plugin-infra/docs/plans/2026-05-26-dns-provider-contract-design
 | Date | Author | Change |
 |---|---|---|
 | 2026-05-26 | codingsloth@pm.me | Initial plan draft (cycle 1). Mirrors design cycle 3.5. 8 PRs, 32 tasks, 6 repos. |
+| 2026-05-26 | codingsloth@pm.me | Plan cycle 2 — addresses adversarial cycle 1 findings. (C1) CF cfProvider injected `zones zoneListerCF` interface field; iterator pattern uses cloudflare-go/v7 AutoPager Next()/Current()/Err() not iter.Seq2. (C2) NC types corrected: `DomainsGetListCommandResponse`, `IsOurDNS *bool`, `Expires *DateTime`, subservice `client.Domains.GetList`, `*int` pointer args. (C3) DO `Links.CurrentPage()` single int return; loop terminates via `IsLastPage()`. (C4) Hover prerequisite git pull added; module-path note clarifies pkg/hoverclient is subpath of parent module (tag parent at v0.4.0); fixed `Domain.Name` field (was `DomainName`). (C5) `--output`/`-o` flag added to import-all; scenarios use it. (I1) interface assertion `interfaces.EnumeratorAll` not `Enumerator`. (I2) `infraStateStore` (package-private) not `interfaces.IaCStateStore`. (I3) variable `configFile` not `cfgFile`. (I4) Task 24 runtime-launch-validation step added: build wfctl + invoke --help on new commands + verify --required error paths. (I5) PR 4.5 + Task 13.5 added for workflow-registry pin-bump batched per `feedback_version_bump_immediate_merge.md`. (I6) scenario layout normalized to canonical `scenarios/<id>-<name>/{scenario.yaml,config/,test/}` with IDs 89/90/91; stub plugin moved to `scenarios/lib/dns-stub-plugin/`; PASS/FAIL/SKIP counter pattern adopted; scenarios.json registration tasked. Plan now 9 PRs, 33 tasks, 7 repos. |
