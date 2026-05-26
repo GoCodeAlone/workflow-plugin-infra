@@ -254,6 +254,8 @@ github.com/libdns/cloudflare v0.2.2 h1:XWHv+C1dDcApqazlh08Q6pjytYLgR2a+Y3xrXFu0v
 github.com/libdns/cloudflare v0.2.2/go.mod h1:w9uTmRCDlAoafAsTPnn2nJ0XHK/eaUMh86DUk8BWi60=
 github.com/libdns/digitalocean v0.0.0-20250606071607-dfa7af5c2e31 h1:raIuvxYVJtZ60hREOOL3MS2AS3xA0W2G3grPQ4rGTeo=
 github.com/libdns/digitalocean v0.0.0-20250606071607-dfa7af5c2e31/go.mod h1:hde/tjNiPFe1lLaf2TtaCAYgJ9j/SGLhaQMpgZlF6e0=
+github.com/libdns/godaddy v1.1.0 h1:mxB107yFulEGApacljrCfaR4faR/9d9SyrGmjD2VubU=
+github.com/libdns/godaddy v1.1.0/go.mod h1:ZU6B93OoBN8jTbN97Ud5QdgbNvd6asV0EO8KVrGMWm4=
 github.com/libdns/googleclouddns v1.2.0 h1:6K333FYwKkiOuq0Rpe5XVyUkgNoY3X7RgKqVMFEtaEs=
 github.com/libdns/googleclouddns v1.2.0/go.mod h1:ubTPz+22nDk9aOmNBQAOgHd3/yfKUPZXB88XHrP5iCk=
 github.com/libdns/libdns v1.1.1 h1:wPrHrXILoSHKWJKGd0EiAVmiJbFShguILTg9leS/P/U=
