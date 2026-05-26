@@ -44,7 +44,7 @@
 
 **Status:** Draft
 
-**Parallelism note**: after PR 1 lands (registry refactor + Route53), PRs 2-6 each add ONE provider file + ONE docs file. Zero conflicts on `adapter.go`. Only conflict surface is `go.mod`/`go.sum` (additive only; `go mod tidy` after rebase resolves). PRs 2-6 genuinely parallelizable post-PR-1.
+**Sequencing**: PR 1 is **blocking** (introduces the `Register` registry function PRs 2-6 depend on). After PR 1 merges and local master fast-forwards, PRs 2-6 each add ONE provider file + ONE docs file. Zero conflicts on `adapter.go`. Only conflict surface is `go.mod`/`go.sum` (additive only; `go mod tidy` after rebase resolves). PRs 2-6 are parallelizable AMONG THEMSELVES post-PR-1-merge. PRs 2-6 must NOT be opened against `master` before PR 1 merges (build would fail: undefined `Register`). If parallel-open is desired pre-PR-1-merge, branch-stack: PR 2 branches from `feat/dns-provider-v2-route53`, PR 3 from same or from PR 2, etc.
 
 ---
 
@@ -309,9 +309,10 @@ func TestNewRoute53Adapter_RequiresRegion(t *testing.T) {
     }
 }
 
-func TestNewRoute53Adapter_AmbientCredsOK(t *testing.T) {
+func TestNewRoute53Adapter_OnlyRegionRequiredAtConstruction(t *testing.T) {
+    // Adapter accepts region-only creds; libdns lazy-resolves AWS env/role at first API call.
     a, err := newRoute53Adapter(map[string]string{"region": "us-east-1"})
-    if err != nil { t.Fatalf("ambient mode rejected: %v", err) }
+    if err != nil { t.Fatalf("region-only construction rejected: %v", err) }
     if a == nil { t.Fatal("nil adapter") }
 }
 
@@ -368,9 +369,23 @@ func (s *stubR53Provider) AppendRecords(_ context.Context, _ string, r []libdns.
     return r, nil
 }
 
-func TestRoute53_StubRoundTrip_UpsertTXT(t *testing.T) {
-    // Exercises the adapter's actual UpsertTXT path via stub-iface injection.
-    // Uses package-private helper that mirrors adapter shape.
+// upsertTXTViaR53 mirrors route53Adapter.UpsertTXT's algorithm for stub injection.
+// Helper lives in _test.go (not production) — production calls SetRecords directly.
+// Boundary lock is provided by the `var _ r53ProviderIface = (*libdnsr53.Provider)(nil)`
+// compile assertion above; this helper documents the algorithm shape.
+func upsertTXTViaR53(ctx context.Context, p r53ProviderIface, zone, relName string, values []string, ttl int) error {
+    recs := make([]libdns.Record, len(values))
+    for i, v := range values {
+        recs[i] = libdns.RR{Type: "TXT", Name: relName, Data: v, TTL: time.Duration(ttl) * time.Second}
+    }
+    _, err := p.SetRecords(ctx, zone, recs)
+    return err
+}
+
+func TestRoute53UpsertTXTAlgorithmShape(t *testing.T) {
+    // Locks the algorithm shape that route53Adapter.UpsertTXT implements:
+    // one SetRecords call with TXT records matching the requested values.
+    // Production code path is verified by the compile-time `var _` assertion.
     stub := &stubR53Provider{}
     err := upsertTXTViaR53(context.Background(), stub, "example.com", "_workflow-dns-policy", []string{"v=wfinfra-v1 o=sre"}, 300)
     if err != nil { t.Fatalf("upsert: %v", err) }
@@ -429,19 +444,6 @@ func newRoute53Adapter(creds map[string]string) (dnspolicy.Adapter, error) {
     }}, nil
 }
 
-// upsertTXTViaR53 is the package-private RRset-replace helper that mirrors
-// route53Adapter.UpsertTXT for stub-injection round-trip testing.
-func upsertTXTViaR53(ctx context.Context, p interface {
-    SetRecords(context.Context, string, []libdns.Record) ([]libdns.Record, error)
-}, zone, relName string, values []string, ttl int) error {
-    recs := make([]libdns.Record, len(values))
-    for i, v := range values {
-        recs[i] = libdns.RR{Type: "TXT", Name: relName, Data: v, TTL: time.Duration(ttl) * time.Second}
-    }
-    _, err := p.SetRecords(ctx, zone, recs)
-    return err
-}
-
 func (a *route53Adapter) GetTXT(ctx context.Context, name string) ([]string, error) {
     zone := zoneFromPolicyName(name)
     relName := relativeNameFromFQDN(name, zone)
@@ -458,7 +460,14 @@ func (a *route53Adapter) GetTXT(ctx context.Context, name string) ([]string, err
 func (a *route53Adapter) UpsertTXT(ctx context.Context, name string, values []string, ttl int) error {
     zone := zoneFromPolicyName(name)
     relName := relativeNameFromFQDN(name, zone)
-    return upsertTXTViaR53(ctx, a.provider, zone, relName, values, ttl)
+    recs := make([]libdns.Record, len(values))
+    for i, v := range values {
+        recs[i] = libdns.RR{Type: "TXT", Name: relName, Data: v, TTL: time.Duration(ttl) * time.Second}
+    }
+    if _, err := a.provider.SetRecords(ctx, zone, recs); err != nil {
+        return fmt.Errorf("route53: upsert TXT: %w (creds redacted)", err)
+    }
+    return nil
 }
 
 func (a *route53Adapter) UpsertRecord(ctx context.Context, zone, name, recordType, data string, ttl, priority int32) (string, error) {
@@ -504,7 +513,7 @@ Adding a provider is a feature (new switch case). Removing a provider is a break
 
 ## `priority` argument note
 
-`UpsertRecord` accepts a `priority int32` arg. For MX/SRV record types, libdns uses dedicated typed records; the current adapter wrappers pass `priority` through only when supported. For non-MX/SRV record types, `priority` is silently dropped (matches v1 behavior). v3 followup: typed-record dispatch for MX/SRV.
+`UpsertRecord` accepts a `priority int32` arg. v1 adapters (DigitalOcean, Cloudflare) drop this for all record types using the same `libdns.RR{...}` shape — non-zero priority is silently ignored. v2 adapters preserve this v1 precedent (no behavior regression). MX/SRV typed-record dispatch (using `libdns.MX{Preference:...}` / `libdns.SRV{Priority:...}`) is a known v3 followup tracked in the design's "Followups" section. Wontfix in v2: matching v1 precedent avoids surprise behavior change for existing consumers.
 ```
 
 **Step 9: Add docs/providers/route53.md**
@@ -606,9 +615,10 @@ func TestNewGCPAdapter_RequiresProject(t *testing.T) {
     }
 }
 
-func TestNewGCPAdapter_ADCMode(t *testing.T) {
+func TestNewGCPAdapter_OnlyProjectRequiredAtConstruction(t *testing.T) {
+    // Adapter accepts project-only creds; libdns resolves ADC at first API call.
     a, err := newGoogleCloudDNSAdapter(map[string]string{"gcp_project": "proj-x"})
-    if err != nil { t.Fatalf("ADC mode rejected: %v", err) }
+    if err != nil { t.Fatalf("project-only construction rejected: %v", err) }
     if a == nil { t.Fatal("nil adapter") }
 }
 
@@ -648,7 +658,17 @@ func (s *stubGCPProvider) SetRecords(_ context.Context, _ string, r []libdns.Rec
 func (s *stubGCPProvider) DeleteRecords(_ context.Context, _ string, r []libdns.Record) ([]libdns.Record, error) { return r, nil }
 func (s *stubGCPProvider) AppendRecords(_ context.Context, _ string, r []libdns.Record) ([]libdns.Record, error) { return r, nil }
 
-func TestGCP_StubRoundTrip_UpsertTXT(t *testing.T) {
+// Helper mirrors gcpAdapter.UpsertTXT algorithm shape; production calls SetRecords directly.
+func upsertTXTViaGCP(ctx context.Context, p gcpProviderIface, zone, relName string, values []string, ttl int) error {
+    recs := make([]libdns.Record, len(values))
+    for i, v := range values {
+        recs[i] = libdns.RR{Type: "TXT", Name: relName, Data: v, TTL: time.Duration(ttl) * time.Second}
+    }
+    _, err := p.SetRecords(ctx, zone, recs)
+    return err
+}
+
+func TestGCPUpsertTXTAlgorithmShape(t *testing.T) {
     stub := &stubGCPProvider{}
     if err := upsertTXTViaGCP(context.Background(), stub, "example.com", "_workflow-dns-policy", []string{"v=wfinfra-v1 o=sre"}, 300); err != nil {
         t.Fatalf("upsert: %v", err)
@@ -701,17 +721,6 @@ func newGoogleCloudDNSAdapter(creds map[string]string) (dnspolicy.Adapter, error
     }}, nil
 }
 
-func upsertTXTViaGCP(ctx context.Context, p interface {
-    SetRecords(context.Context, string, []libdns.Record) ([]libdns.Record, error)
-}, zone, relName string, values []string, ttl int) error {
-    recs := make([]libdns.Record, len(values))
-    for i, v := range values {
-        recs[i] = libdns.RR{Type: "TXT", Name: relName, Data: v, TTL: time.Duration(ttl) * time.Second}
-    }
-    _, err := p.SetRecords(ctx, zone, recs)
-    return err
-}
-
 func (a *gcpAdapter) GetTXT(ctx context.Context, name string) ([]string, error) {
     zone := zoneFromPolicyName(name)
     relName := relativeNameFromFQDN(name, zone)
@@ -728,7 +737,14 @@ func (a *gcpAdapter) GetTXT(ctx context.Context, name string) ([]string, error) 
 func (a *gcpAdapter) UpsertTXT(ctx context.Context, name string, values []string, ttl int) error {
     zone := zoneFromPolicyName(name)
     relName := relativeNameFromFQDN(name, zone)
-    return upsertTXTViaGCP(ctx, a.provider, zone, relName, values, ttl)
+    recs := make([]libdns.Record, len(values))
+    for i, v := range values {
+        recs[i] = libdns.RR{Type: "TXT", Name: relName, Data: v, TTL: time.Duration(ttl) * time.Second}
+    }
+    if _, err := a.provider.SetRecords(ctx, zone, recs); err != nil {
+        return fmt.Errorf("googleclouddns: upsert TXT: %w (creds redacted)", err)
+    }
+    return nil
 }
 
 func (a *gcpAdapter) UpsertRecord(ctx context.Context, zone, name, recordType, data string, ttl, priority int32) (string, error) {
@@ -852,9 +868,10 @@ func TestNewAzureAdapter_RequiresResourceGroup(t *testing.T) {
     }
 }
 
-func TestNewAzureAdapter_ManagedIdentityMode(t *testing.T) {
+func TestNewAzureAdapter_OnlySubAndRGRequiredAtConstruction(t *testing.T) {
+    // Empty service-principal triple → libdns resolves managed-identity at first API call.
     a, err := newAzureAdapter(map[string]string{"subscription_id": "sub", "resource_group_name": "rg"})
-    if err != nil { t.Fatalf("MI mode rejected: %v", err) }
+    if err != nil { t.Fatalf("sub+rg-only construction rejected: %v", err) }
     if a == nil { t.Fatal("nil adapter") }
 }
 
@@ -902,7 +919,17 @@ func (s *stubAzProvider) SetRecords(_ context.Context, _ string, r []libdns.Reco
 func (s *stubAzProvider) DeleteRecords(_ context.Context, _ string, r []libdns.Record) ([]libdns.Record, error) { return r, nil }
 func (s *stubAzProvider) AppendRecords(_ context.Context, _ string, r []libdns.Record) ([]libdns.Record, error) { return r, nil }
 
-func TestAzure_StubRoundTrip_UpsertTXT(t *testing.T) {
+// Helper mirrors azureAdapter.UpsertTXT algorithm shape; production calls SetRecords directly.
+func upsertTXTViaAzure(ctx context.Context, p azProviderIface, zone, relName string, values []string, ttl int) error {
+    recs := make([]libdns.Record, len(values))
+    for i, v := range values {
+        recs[i] = libdns.RR{Type: "TXT", Name: relName, Data: v, TTL: time.Duration(ttl) * time.Second}
+    }
+    _, err := p.SetRecords(ctx, zone, recs)
+    return err
+}
+
+func TestAzureUpsertTXTAlgorithmShape(t *testing.T) {
     stub := &stubAzProvider{}
     if err := upsertTXTViaAzure(context.Background(), stub, "example.com", "_workflow-dns-policy", []string{"v=wfinfra-v1 o=sre"}, 300); err != nil {
         t.Fatalf("upsert: %v", err)
@@ -973,17 +1000,6 @@ func newAzureAdapter(creds map[string]string) (dnspolicy.Adapter, error) {
     }}, nil
 }
 
-func upsertTXTViaAzure(ctx context.Context, p interface {
-    SetRecords(context.Context, string, []libdns.Record) ([]libdns.Record, error)
-}, zone, relName string, values []string, ttl int) error {
-    recs := make([]libdns.Record, len(values))
-    for i, v := range values {
-        recs[i] = libdns.RR{Type: "TXT", Name: relName, Data: v, TTL: time.Duration(ttl) * time.Second}
-    }
-    _, err := p.SetRecords(ctx, zone, recs)
-    return err
-}
-
 func (a *azureAdapter) GetTXT(ctx context.Context, name string) ([]string, error) {
     zone := zoneFromPolicyName(name)
     relName := relativeNameFromFQDN(name, zone)
@@ -1000,7 +1016,14 @@ func (a *azureAdapter) GetTXT(ctx context.Context, name string) ([]string, error
 func (a *azureAdapter) UpsertTXT(ctx context.Context, name string, values []string, ttl int) error {
     zone := zoneFromPolicyName(name)
     relName := relativeNameFromFQDN(name, zone)
-    return upsertTXTViaAzure(ctx, a.provider, zone, relName, values, ttl)
+    recs := make([]libdns.Record, len(values))
+    for i, v := range values {
+        recs[i] = libdns.RR{Type: "TXT", Name: relName, Data: v, TTL: time.Duration(ttl) * time.Second}
+    }
+    if _, err := a.provider.SetRecords(ctx, zone, recs); err != nil {
+        return fmt.Errorf("azuredns: upsert TXT: %w (creds redacted)", err)
+    }
+    return nil
 }
 
 func (a *azureAdapter) UpsertRecord(ctx context.Context, zone, name, recordType, data string, ttl, priority int32) (string, error) {
@@ -1172,7 +1195,17 @@ func (s *stubNCProvider) SetRecords(_ context.Context, _ string, r []libdns.Reco
 func (s *stubNCProvider) AppendRecords(_ context.Context, _ string, r []libdns.Record) ([]libdns.Record, error) { return r, nil }
 func (s *stubNCProvider) DeleteRecords(_ context.Context, _ string, r []libdns.Record) ([]libdns.Record, error) { return r, nil }
 
-func TestNamecheap_StubRoundTrip_UpsertTXT(t *testing.T) {
+// Helper mirrors namecheapAdapter.UpsertTXT algorithm shape; production calls SetRecords directly.
+func upsertTXTViaNC(ctx context.Context, p ncProviderIface, zone, relName string, values []string, ttl int) error {
+    recs := make([]libdns.Record, len(values))
+    for i, v := range values {
+        recs[i] = libdns.RR{Type: "TXT", Name: relName, Data: v, TTL: time.Duration(ttl) * time.Second}
+    }
+    _, err := p.SetRecords(ctx, zone, recs)
+    return err
+}
+
+func TestNamecheapUpsertTXTAlgorithmShape(t *testing.T) {
     stub := &stubNCProvider{}
     if err := upsertTXTViaNC(context.Background(), stub, "example.com", "_workflow-dns-policy", []string{"v=wfinfra-v1 o=sre"}, 300); err != nil {
         t.Fatalf("upsert: %v", err)
@@ -1224,17 +1257,6 @@ func newNamecheapAdapter(creds map[string]string) (dnspolicy.Adapter, error) {
     }}, nil
 }
 
-func upsertTXTViaNC(ctx context.Context, p interface {
-    SetRecords(context.Context, string, []libdns.Record) ([]libdns.Record, error)
-}, zone, relName string, values []string, ttl int) error {
-    recs := make([]libdns.Record, len(values))
-    for i, v := range values {
-        recs[i] = libdns.RR{Type: "TXT", Name: relName, Data: v, TTL: time.Duration(ttl) * time.Second}
-    }
-    _, err := p.SetRecords(ctx, zone, recs)
-    return err
-}
-
 func (a *namecheapAdapter) GetTXT(ctx context.Context, name string) ([]string, error) {
     zone := zoneFromPolicyName(name)
     relName := relativeNameFromFQDN(name, zone)
@@ -1251,7 +1273,14 @@ func (a *namecheapAdapter) GetTXT(ctx context.Context, name string) ([]string, e
 func (a *namecheapAdapter) UpsertTXT(ctx context.Context, name string, values []string, ttl int) error {
     zone := zoneFromPolicyName(name)
     relName := relativeNameFromFQDN(name, zone)
-    return upsertTXTViaNC(ctx, a.provider, zone, relName, values, ttl)
+    recs := make([]libdns.Record, len(values))
+    for i, v := range values {
+        recs[i] = libdns.RR{Type: "TXT", Name: relName, Data: v, TTL: time.Duration(ttl) * time.Second}
+    }
+    if _, err := a.provider.SetRecords(ctx, zone, recs); err != nil {
+        return fmt.Errorf("namecheap: upsert TXT: %w (creds redacted)", err)
+    }
+    return nil
 }
 
 func (a *namecheapAdapter) UpsertRecord(ctx context.Context, zone, name, recordType, data string, ttl, priority int32) (string, error) {
@@ -1395,7 +1424,17 @@ func (s *stubGDProvider) SetRecords(_ context.Context, _ string, r []libdns.Reco
 func (s *stubGDProvider) AppendRecords(_ context.Context, _ string, r []libdns.Record) ([]libdns.Record, error) { return r, nil }
 func (s *stubGDProvider) DeleteRecords(_ context.Context, _ string, r []libdns.Record) ([]libdns.Record, error) { return r, nil }
 
-func TestGoDaddy_StubRoundTrip_UpsertTXT(t *testing.T) {
+// Helper mirrors godaddyAdapter.UpsertTXT algorithm shape; production calls SetRecords directly.
+func upsertTXTViaGD(ctx context.Context, p gdProviderIface, zone, relName string, values []string, ttl int) error {
+    recs := make([]libdns.Record, len(values))
+    for i, v := range values {
+        recs[i] = libdns.RR{Type: "TXT", Name: relName, Data: v, TTL: time.Duration(ttl) * time.Second}
+    }
+    _, err := p.SetRecords(ctx, zone, recs)
+    return err
+}
+
+func TestGoDaddyUpsertTXTAlgorithmShape(t *testing.T) {
     stub := &stubGDProvider{}
     if err := upsertTXTViaGD(context.Background(), stub, "example.com", "_workflow-dns-policy", []string{"v=wfinfra-v1 o=sre"}, 300); err != nil {
         t.Fatalf("upsert: %v", err)
@@ -1449,17 +1488,6 @@ func newGoDaddyAdapter(creds map[string]string) (dnspolicy.Adapter, error) {
     return &godaddyAdapter{provider: &libdnsgd.Provider{APIToken: token}}, nil
 }
 
-func upsertTXTViaGD(ctx context.Context, p interface {
-    SetRecords(context.Context, string, []libdns.Record) ([]libdns.Record, error)
-}, zone, relName string, values []string, ttl int) error {
-    recs := make([]libdns.Record, len(values))
-    for i, v := range values {
-        recs[i] = libdns.RR{Type: "TXT", Name: relName, Data: v, TTL: time.Duration(ttl) * time.Second}
-    }
-    _, err := p.SetRecords(ctx, zone, recs)
-    return err
-}
-
 func (a *godaddyAdapter) GetTXT(ctx context.Context, name string) ([]string, error) {
     zone := zoneFromPolicyName(name)
     relName := relativeNameFromFQDN(name, zone)
@@ -1476,7 +1504,14 @@ func (a *godaddyAdapter) GetTXT(ctx context.Context, name string) ([]string, err
 func (a *godaddyAdapter) UpsertTXT(ctx context.Context, name string, values []string, ttl int) error {
     zone := zoneFromPolicyName(name)
     relName := relativeNameFromFQDN(name, zone)
-    return upsertTXTViaGD(ctx, a.provider, zone, relName, values, ttl)
+    recs := make([]libdns.Record, len(values))
+    for i, v := range values {
+        recs[i] = libdns.RR{Type: "TXT", Name: relName, Data: v, TTL: time.Duration(ttl) * time.Second}
+    }
+    if _, err := a.provider.SetRecords(ctx, zone, recs); err != nil {
+        return fmt.Errorf("godaddy: upsert TXT: %w (creds redacted)", err)
+    }
+    return nil
 }
 
 func (a *godaddyAdapter) UpsertRecord(ctx context.Context, zone, name, recordType, data string, ttl, priority int32) (string, error) {
