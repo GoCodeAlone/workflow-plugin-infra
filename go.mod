@@ -6,6 +6,7 @@ require (
 	github.com/GoCodeAlone/workflow v0.64.0
 	github.com/libdns/cloudflare v0.2.2
 	github.com/libdns/digitalocean v0.0.0-20250606071607-dfa7af5c2e31
+	github.com/libdns/godaddy v1.1.0
 	github.com/libdns/googleclouddns v1.2.0
 	github.com/libdns/libdns v1.1.1
 	github.com/libdns/namecheap v1.0.0
