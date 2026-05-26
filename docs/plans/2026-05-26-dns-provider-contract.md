@@ -883,44 +883,49 @@ gh pr create --title "feat(provider): ListDomains + EnumerateAll for infra.dns" 
 
 Per `feedback_version_bump_immediate_merge.md`: version-pin manifest changes auto-merge in same turn. Batch all 4 provider bumps into one PR.
 
-**Files:**
-- Modify: `manifests/workflow-plugin-digitalocean.yaml` (version pin)
-- Modify: `manifests/workflow-plugin-cloudflare.yaml`
-- Modify: `manifests/workflow-plugin-namecheap.yaml`
-- Modify: `manifests/workflow-plugin-hover.yaml`
+**Files (cycle-3 corrected — workflow-registry uses `plugins/<name>/manifest.json` not `manifests/*.yaml`):**
+- Modify: `plugins/workflow-plugin-digitalocean/manifest.json` (version pin)
+- Modify: `plugins/workflow-plugin-cloudflare/manifest.json`
+- Modify: `plugins/workflow-plugin-namecheap/manifest.json`
+- Modify: `plugins/workflow-plugin-hover/manifest.json`
 
 **Step 1: Bump pins to each provider's new tagged version**
 
 For each provider manifest, update the `version:` field to the tag published after its respective PR (1-4) landed. Exact version numbers determined at PR-landing time; no hardcoded values here.
 
-**Step 2: Validate manifests via existing ValidateManifest helper**
+**Step 2: Validate manifests via the registry's own validation script**
 
-There is no `wfctl plugin registry-validate` subcommand (verified cycle-2 adversarial). Use one of:
-
-- (a) `wfctl plugin validate <path>` for each manifest file individually (if validates registry manifests — verify with `wfctl plugin --help` at impl time)
-- (b) Inline Go test calling the existing `ValidateManifest()` function exported from `cmd/wfctl/registry_validate.go`:
+workflow-registry has its own `validate-manifests.sh` (verified by cycle-3 adversarial) — a repo-local shell script that walks `plugins/*/manifest.json` + validates schema. Use it:
 
 ```bash
-# Quick inline check:
-GOWORK=off go run -tags scripts ./scripts/validate-manifests.go manifests/
+./validate-manifests.sh
+# Expect: each updated manifest reports OK
 ```
 
-`scripts/validate-manifests.go` is a small wrapper (~20 LOC) that loads each YAML, unmarshals to `RegistryManifest`, calls `ValidateManifest`, and reports errors. If workflow-registry repo has CI that already does this on PR, the local-validation step can be skipped — verify CI behavior at PR-open time.
+If a Go-based validation entry is preferred, `cmd/wfctl/registry_validate.go` exports `ValidateManifest(m *RegistryManifest, opts ValidationOptions) []ValidationError` — but the shell script is the repo's canonical preflight. CI will also run it on PR open, so local validation is belt-and-suspenders.
 
 **Step 3: Commit + push + auto-merge PR**
 
 ```bash
-git add manifests/
+git add plugins/workflow-plugin-digitalocean/manifest.json \
+        plugins/workflow-plugin-cloudflare/manifest.json \
+        plugins/workflow-plugin-namecheap/manifest.json \
+        plugins/workflow-plugin-hover/manifest.json
 git commit -m "chore(manifest): pin-bump DO/CF/NC/Hover providers for EnumerateAll infra.dns"
 git push -u origin chore/dns-providers-pin-bump-2026-05-26T1900
-gh pr create --title "chore(manifest): pin-bump 4 DNS providers for EnumerateAll cascade" \
+
+# Capture PR URL+number atomically from gh pr create — no sleep, no race
+PR_URL=$(gh pr create \
+  --title "chore(manifest): pin-bump 4 DNS providers for EnumerateAll cascade" \
   --body "Pin-bumps four manifests after the EnumerateAll(\"infra.dns\") cascade lands. Part of docs/plans/2026-05-26-dns-provider-contract.md in workflow-plugin-infra." \
-  --base main
+  --base main)
+PR_NUM=$(printf '%s' "$PR_URL" | grep -oE '[0-9]+$')
+
 # Per feedback_version_bump_immediate_merge: admin-merge in same turn
-sleep 5
-PR=$(gh pr view chore/dns-providers-pin-bump-2026-05-26T1900 --json number -q .number)
-gh pr merge "$PR" --squash --admin --delete-branch
+gh pr merge "$PR_NUM" --squash --admin --delete-branch
 ```
+
+PR number captured from `gh pr create` stdout (URL ends with `/pull/<NUM>`); avoids the brittle `sleep 5` pattern (flagged by cycle-3 adversarial + harness-prohibited per `feedback_no_speculative_remote_ci.md`).
 
 ---
 
@@ -1265,14 +1270,16 @@ git commit -m "feat(iac): add OnBeforeAction fatal hook to ApplyPlanHooks"
 - Create: `dns/policy/parse.go`, `dns/policy/policy.go`, `dns/policy/match.go`, `dns/policy/reader.go`, `dns/policy/writer.go`, `dns/policy/serialize.go` (copy from `workflow-plugin-infra/internal/dnspolicy/`)
 - Create: `dns/policy/*_test.go` (copy tests)
 
-**Step 1: Copy + rename package**
+**Step 1: Copy + rename package** (use perl for portability — BSD vs GNU sed differ on `-i` syntax)
 
 ```bash
 mkdir -p dns/policy
 cp /Users/jon/workspace/workflow-plugin-infra/internal/dnspolicy/*.go dns/policy/
-sed -i '' 's|^package dnspolicy|package policy|' dns/policy/*.go
-sed -i '' 's|github.com/GoCodeAlone/workflow-plugin-infra/internal/dnspolicy|github.com/GoCodeAlone/workflow/dns/policy|g' dns/policy/*.go
+perl -pi -e 's|^package dnspolicy|package policy|' dns/policy/*.go
+perl -pi -e 's|github.com/GoCodeAlone/workflow-plugin-infra/internal/dnspolicy|github.com/GoCodeAlone/workflow/dns/policy|g' dns/policy/*.go
 ```
+
+Apply same `perl -pi -e` form to Tasks 20 + 21 (dnsgate/dnsaudit relocation).
 
 **Step 2: Verify package compiles + tests pass**
 
@@ -1371,8 +1378,8 @@ git commit -m "feat(dns/gate): relocate gate; adapt to ResourceDriver.Read TXT s
 ```bash
 mkdir -p dns/audit
 cp /Users/jon/workspace/workflow-plugin-infra/internal/dnsaudit/*.go dns/audit/
-sed -i '' 's|^package dnsaudit|package audit|' dns/audit/*.go
-sed -i '' 's|plugins/infra/dns-audit.jsonl|plugins/wfctl/dns-audit.jsonl|' dns/audit/audit.go
+perl -pi -e 's|^package dnsaudit|package audit|' dns/audit/*.go
+perl -pi -e 's|plugins/infra/dns-audit.jsonl|plugins/wfctl/dns-audit.jsonl|' dns/audit/audit.go
 ```
 
 **Step 2: Add one-time migration**
@@ -1790,8 +1797,24 @@ func (s *stubServer) EnumerateAll(ctx context.Context, resourceType string) ([]*
 }
 
 func (s *stubServer) Import(ctx context.Context, cloudID, resourceType string) (*interfaces.ResourceOutput, error) {
-    // Read fixture, find matching zone, return its record set
-    // ...
+    data, err := os.ReadFile(s.fixturePath)
+    if err != nil { return nil, fmt.Errorf("stub: read fixture: %w", err) }
+    var fixture struct {
+        Zones []map[string]any `yaml:"zones"`
+    }
+    if err := yaml.Unmarshal(data, &fixture); err != nil {
+        return nil, fmt.Errorf("stub: parse fixture: %w", err)
+    }
+    for _, z := range fixture.Zones {
+        if id, _ := z["id"].(string); id == cloudID {
+            return &interfaces.ResourceOutput{
+                ProviderID: cloudID,
+                Type:       resourceType,
+                Outputs:    z, // includes records array from fixture
+            }, nil
+        }
+    }
+    return nil, fmt.Errorf("stub: zone %q not found in fixture", cloudID)
 }
 
 func main() {
@@ -1891,35 +1914,31 @@ git commit -m "feat(scenarios): 89 dns-import-export-roundtrip — import then p
 - Create: `scenarios/90-dns-cross-provider-transfer/config/lossiness.yaml`
 - Create: `scenarios/90-dns-cross-provider-transfer/test/run.sh`
 - Create: `scenarios/90-dns-cross-provider-transfer/test/verify-transfer.py`
-- Create: `scenarios/90-dns-cross-provider-transfer/test/translate-state-to-config.py`
 
 **Step 1: Two stub providers**
 
 Configure two stub provider instances (stub-A as DO equivalent, stub-B as CF equivalent). Each loads same record set via fixture.
 
-**Step 2: test/run.sh — config-driven cross-provider apply (no --state-file required)**
+**Step 2: test/run.sh — paired fixture+config pattern (no translate script, no --provider flag)**
 
-`wfctl infra apply --state-file=...` does not exist (verified cycle-2). Use a config-driven path: the source-side import populates state-A's backend; a translation step generates a target-side config that re-declares the same resources with provider=stub-B; `wfctl infra apply` against the target config dispatches Create on stub-B for each zone in the new config. Then re-import-all from stub-B and diff.
+`wfctl infra apply` derives the provider from the config file's `iac.provider.*` module declaration — there is no `--provider` flag (verified `workflow/cmd/wfctl/infra.go:1244-1295`). Use paired source/target fixtures + configs: each side has its own fully-formed `config/*.yaml` declaring the same resource set against its respective provider module.
 
 ```bash
 #!/usr/bin/env bash
 set -euo pipefail
 PASS=0; FAIL=0; SKIP=0
 
-# 1. Import from source provider into source state backend + dump
-wfctl infra apply --config=../config/source.yaml --provider=stub-A && PASS=$((PASS+1)) || FAIL=$((FAIL+1))   # populate stub-A
+# 1. Apply source config → populate stub-A state
+wfctl infra apply --config=../config/source.yaml && PASS=$((PASS+1)) || FAIL=$((FAIL+1))
+
+# 2. Import-all from source provider; capture state
 wfctl infra import-all --config=../config/source.yaml --provider=stub-A --type=infra.dns --output=/tmp/source-state.json && PASS=$((PASS+1)) || FAIL=$((FAIL+1))
 
-# 2. Translate source state → target config YAML
-#    (a small helper script that reads source-state.json and emits target.yaml
-#    with the same resources but provider field rewritten to stub-B)
-python3 ./translate-state-to-config.py /tmp/source-state.json stub-B > /tmp/target-generated.yaml || FAIL=$((FAIL+1))
+# 3. Apply target config → populate stub-B state (same resource set, different provider module)
+wfctl infra apply --config=../config/target.yaml && PASS=$((PASS+1)) || FAIL=$((FAIL+1))
 
-# 3. Apply translated config to target provider
-wfctl infra apply --config=/tmp/target-generated.yaml --provider=stub-B && PASS=$((PASS+1)) || FAIL=$((FAIL+1))
-
-# 4. Import-all back from target + dump
-wfctl infra import-all --config=/tmp/target-generated.yaml --provider=stub-B --type=infra.dns --output=/tmp/roundtrip-state.json && PASS=$((PASS+1)) || FAIL=$((FAIL+1))
+# 4. Import-all from target provider; capture state
+wfctl infra import-all --config=../config/target.yaml --provider=stub-B --type=infra.dns --output=/tmp/roundtrip-state.json && PASS=$((PASS+1)) || FAIL=$((FAIL+1))
 
 # 5. Diff source vs roundtrip with per-(provider, record_type, field) exclusions
 python3 ./verify-transfer.py /tmp/source-state.json /tmp/roundtrip-state.json ../config/lossiness.yaml && PASS=$((PASS+1)) || FAIL=$((FAIL+1))
@@ -1928,7 +1947,9 @@ echo "PASS=$PASS FAIL=$FAIL SKIP=$SKIP"
 [ $FAIL -eq 0 ]
 ```
 
-`translate-state-to-config.py` is a small (~30 LOC) helper in the same `test/` dir. It reads source-state.json, walks `.resources`, emits the equivalent YAML with `provider:` swapped. The transfer is config-driven; no `--state-file` flag needed.
+`config/source.yaml` declares `iac.provider.stub` module named `stub-A` + N `infra.dns` resources targeting it. `config/target.yaml` declares same module type named `stub-B` + same N `infra.dns` resources targeting it. Both configs share the same record set (DNS records identical) so the cross-provider parity check is meaningful. The fixtures backing each stub provider serve canned `Import` responses with matching record content.
+
+No `translate-state-to-config.py` helper needed (cycle-3 reviewer's Option 2). The state→config schema gap was real; paired fixtures avoid it entirely.
 
 **Step 3: Lossiness charter**
 
@@ -2051,5 +2072,6 @@ Design: workflow-plugin-infra/docs/plans/2026-05-26-dns-provider-contract-design
 | Date | Author | Change |
 |---|---|---|
 | 2026-05-26 | codingsloth@pm.me | Initial plan draft (cycle 1). Mirrors design cycle 3.5. 8 PRs, 32 tasks, 6 repos. |
+| 2026-05-26 | codingsloth@pm.me | Plan cycle 4 — addresses adversarial cycle 3 findings. (C1-CYCLE3) `wfctl infra apply` has NO `--provider` flag — provider derives from config's `iac.provider` module. Task 31 reworked to paired source/target config pattern (no translate script). (I1-CYCLE3) workflow-registry stores manifests at `plugins/<name>/manifest.json`, NOT `manifests/*.yaml`. Task 13.5 paths + format corrected; uses repo's own `validate-manifests.sh` for preflight. (I2-CYCLE3) `sleep 5` dropped; PR number captured atomically from `gh pr create` stdout. (I3-CYCLE3) `translate-state-to-config.py` helper deleted entirely (reviewer Option 2 — paired fixture+config pair eliminates state→config schema gap). (M1) `sed -i ''` BSD-only → `perl -pi -e` for portability across Tasks 19/20/21. (M2) stub plugin Import method now has explicit YAML fixture lookup implementation, not a TODO placeholder. |
 | 2026-05-26 | codingsloth@pm.me | Plan cycle 3 — addresses adversarial cycle 2 findings. (C2-NEW) Task 15 runtime dispatch now asserts `interfaces.EnumeratorAll` not `interfaces.Enumerator` (the original I1 fix was applied to the compile-time assertion only, missed the runtime dispatch). (C3-NEW) CF test stub dropped reference to nonexistent `pagination.NewArrayAutoPagerFromSlice`; instead define minimal `zonePager` interface (`Next() bool / Current() Zone / Err() error`) that both the real AutoPager and a `slicePager` test fake satisfy. (C4-NEW) `wfctl plugin registry-validate` doesn't exist; replaced with explicit Go-test or `wfctl plugin validate <path>` per-manifest fallback. (I1-CYCLE2) Task 31 reworked to use config-driven cross-provider apply path (no `--state-file` flag; added `translate-state-to-config.py` helper). (I2-CYCLE2) `dumpStateToFile` now has explicit implementation block w/ `infraStateStore.ListResources` extension note. |
 | 2026-05-26 | codingsloth@pm.me | Plan cycle 2 — addresses adversarial cycle 1 findings. (C1) CF cfProvider injected `zones zoneListerCF` interface field; iterator pattern uses cloudflare-go/v7 AutoPager Next()/Current()/Err() not iter.Seq2. (C2) NC types corrected: `DomainsGetListCommandResponse`, `IsOurDNS *bool`, `Expires *DateTime`, subservice `client.Domains.GetList`, `*int` pointer args. (C3) DO `Links.CurrentPage()` single int return; loop terminates via `IsLastPage()`. (C4) Hover prerequisite git pull added; module-path note clarifies pkg/hoverclient is subpath of parent module (tag parent at v0.4.0); fixed `Domain.Name` field (was `DomainName`). (C5) `--output`/`-o` flag added to import-all; scenarios use it. (I1) interface assertion `interfaces.EnumeratorAll` not `Enumerator`. (I2) `infraStateStore` (package-private) not `interfaces.IaCStateStore`. (I3) variable `configFile` not `cfgFile`. (I4) Task 24 runtime-launch-validation step added: build wfctl + invoke --help on new commands + verify --required error paths. (I5) PR 4.5 + Task 13.5 added for workflow-registry pin-bump batched per `feedback_version_bump_immediate_merge.md`. (I6) scenario layout normalized to canonical `scenarios/<id>-<name>/{scenario.yaml,config/,test/}` with IDs 89/90/91; stub plugin moved to `scenarios/lib/dns-stub-plugin/`; PASS/FAIL/SKIP counter pattern adopted; scenarios.json registration tasked. Plan now 9 PRs, 33 tasks, 7 repos. |
