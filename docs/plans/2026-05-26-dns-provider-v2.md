@@ -306,6 +306,7 @@ import (
     "strings"
     "testing"
 
+    libdnsr53 "github.com/libdns/route53"
     "github.com/libdns/libdns"
 )
 
