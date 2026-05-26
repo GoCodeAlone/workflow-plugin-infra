@@ -1,6 +1,6 @@
 # DNS provider v2 — multi-provider adapter expansion
 
-**Status:** Draft (cycle 2 — adversarial cycle 1 findings applied)
+**Status:** Draft (cycle 3 — adversarial cycle 2 findings applied)
 **Author:** codingsloth@pm.me
 **Date:** 2026-05-26
 **Predecessor:** docs/plans/2026-05-25-dns-ownership-policy-design.md (v1: DO + Cloudflare)
@@ -9,7 +9,8 @@
 ## Revision history
 
 - **cycle 1 (initial draft)**: 6 providers, dual-aliasing, GCP triple-form auth, AWS assume-role, GoDaddy two-key, Namecheap `api_user` + `sandbox=true` — most cred-key shapes invented rather than verified against upstream.
-- **cycle 2 (this revision)**: cred keys aligned to verified upstream `libdns/*` struct JSON tags (verified via `go doc` against `proxy.golang.org` 2026-05-26). Dual-aliasing dropped. AWS assume-role + GCP inline JSON deferred to v3. Azure managed-identity surfaced. Namecheap whole-zone-replace risk surfaced as Critical pre-merge check. Per-provider docs files (no merge contention). GoDaddy ships with API-restriction warning.
+- **cycle 2**: cred keys aligned to verified upstream `libdns/*` struct JSON tags (verified via `go doc` against `proxy.golang.org` 2026-05-26). Dual-aliasing dropped. AWS assume-role + GCP inline JSON deferred to v3. Azure managed-identity surfaced. Per-provider docs files (no merge contention).
+- **cycle 3 (this revision)**: Adapter pseudo-code signature corrected (was `error`, actual is `(recordID string, err error)`). Namecheap whole-zone risk RESOLVED via upstream-source spike (libdns/namecheap.SetRecords already does Get-merge-Set per (name,type) internally — no adapter logic needed). Engine log scrubbing VERIFIED (workflow/engine.go uses `module.RedactStepOutput` + `RedactionPlaceholder`). ExpandCredsMap semantics CONFIRMED via source (`os.ExpandEnv` returns empty for unset env). A4 weakened to match v1 honest framing. GoDaddy live-test gating dropped (contradicted user "unit tests only"). Hover sequencing left as accepted deferral with explicit user-intent reconciliation.
 
 ## Goal
 
@@ -33,7 +34,7 @@ Source: `/Users/jon/workspace/docs/design-guidance.md`
 
 ## Architecture
 
-Each adapter follows v1 `doAdapter` shape (see `internal/dnsprovider/digitalocean.go` as canonical reference):
+Each adapter follows v1 `doAdapter` shape (see `internal/dnsprovider/digitalocean.go` as canonical reference). Exact signatures must satisfy `dnspolicy.Adapter` = `DNSPolicyReader + DNSRecordWriter` (defined at `internal/dnspolicy/{reader,writer}.go`):
 
 ```go
 type <prov>Adapter struct{ provider *libdns<prov>.Provider }
@@ -46,11 +47,16 @@ func new<Prov>Adapter(creds map[string]string) (dnspolicy.Adapter, error) {
     }}, nil
 }
 
-func (a *<prov>Adapter) GetTXT(...) ([]string, error)      { /* delegate via libdns.RecordGetter */ }
-func (a *<prov>Adapter) UpsertTXT(...) error               { /* per-provider RRset semantics — see table */ }
-func (a *<prov>Adapter) UpsertRecord(...) error            { /* per-provider RRset semantics — see table */ }
-func (a *<prov>Adapter) DeleteRecord(...) error            { /* delegate via libdns.RecordDeleter */ }
+// from DNSPolicyReader (internal/dnspolicy/reader.go):
+func (a *<prov>Adapter) GetTXT(ctx context.Context, name string) ([]string, error)
+func (a *<prov>Adapter) UpsertTXT(ctx context.Context, name string, values []string, ttl int) error
+
+// from DNSRecordWriter (internal/dnspolicy/writer.go):
+func (a *<prov>Adapter) UpsertRecord(ctx context.Context, zone, name, recordType, data string, ttl, priority int32) (recordID string, err error)
+func (a *<prov>Adapter) DeleteRecord(ctx context.Context, zone, name, recordType string) error
 ```
+
+Existing `dnsprovider.Apply` (`internal/dnsprovider/apply.go:13`) wraps the typed-step `Adapter` dispatch and is unchanged in v2.
 
 `NewAdapter` switch grows from 2 → 8 cases.
 
@@ -110,7 +116,7 @@ Adapter enforces: either all three set or all three empty. Mixed (2 set + 1 empt
 
 `client_ip` made strictly required by adapter (even though upstream allows empty + discovery fallback): self-hosted CI runners on private subnets (per workspace guidance) cannot rely on discovery; whitelisted IP must be explicit. Missing → reject.
 
-**Namecheap whole-zone-replace pre-merge check (Critical)**: upstream Namecheap API `namecheap.domains.dns.setHosts` replaces ALL records in a zone per call. Before PR 4 merges, implementer MUST verify libdns/namecheap's `SetRecords` either (a) uses an additive endpoint, OR (b) does internal merge-with-existing before calling setHosts. If neither, the adapter MUST implement merge-with-existing in `UpsertRecord`/`UpsertTXT` to avoid wiping unrelated records. Verification commit + test that exercises 2-record-zone-with-1-foreign-record scenario is gating.
+**Namecheap whole-zone-replace risk — RESOLVED via upstream spike (2026-05-26)**: read `libdns/namecheap v1.0.0` `Provider.SetRecords` source. Upstream already implements safe RRset-replace per (name,type): GetHosts → remove existing records matching name+type of incoming → append new → SetHosts(allHosts). No foreign records lost. No adapter-side merge logic required. `Provider.AppendRecords` similarly does GetHosts → dedupe → SetHosts. Adapter delegates directly to upstream `SetRecords`/`AppendRecords`. Unit test still includes 3-record-zone + 1-foreign-record scenario against a stub `client.GetHosts/SetHosts` to lock the contract.
 
 ### GoDaddy (`libdns/godaddy v1.1.0`)
 
@@ -120,17 +126,17 @@ Adapter enforces: either all three set or all three empty. Mixed (2 set + 1 empt
 
 GoDaddy's production API auth header is `sso-key <key>:<secret>`; upstream wraps this as a single `APIToken` string. Adapter accepts the concatenated form directly.
 
-**GoDaddy API restriction warning**: GoDaddy revoked public DNS API access for accounts with fewer than 50 domains (reported 2024-Q1, unresolved as of upstream v1.1.0 release Aug 2025). Adapter ships with explicit warning in `docs/providers/godaddy.md`: API may return 403 unauthorized for small-account holders. Pre-merge: implementer verifies a real API call (with whatever test account is available) returns either 200 or the documented 403 — both acceptable; silent failure modes not.
+**GoDaddy API restriction warning**: GoDaddy revoked public DNS API access for accounts with fewer than 50 domains (reported 2024-Q1, unresolved as of upstream v1.1.0 release Aug 2025). Adapter ships with explicit warning in `docs/providers/godaddy.md`: API may return 403 unauthorized for small-account holders. No live-cloud verification in CI (per user "unit tests only" constraint + workspace guidance "Cost discipline"). Pre-tag operator-side smoke (manual, off-CI) optional but not gating. Adapter validates cred-key presence + format; runtime 403 surfaces as standard provider error.
 
 ### Hover (`workflow-plugin-hover/pkg/hoverclient`)
 
-| YAML cred key | required? |
-|---|---|
-| `username` | yes |
-| `password` | yes |
-| `totp_secret` | optional |
+| YAML cred key | maps to upstream field | required? |
+|---|---|---|
+| `username` | (custom client; no upstream JSON tag — pkg/hoverclient `NewClient` arg) | yes |
+| `password` | (custom client; no upstream JSON tag) | yes |
+| `totp_secret` | (custom client; optional TOTP shared secret) | optional |
 
-Adapter wraps `pkg/hoverclient` (extracted via workflow-plugin-hover#25). Cred-key shape stabilized post-extraction. Sequenced after that PR ships + tag pinned.
+Adapter wraps `pkg/hoverclient` (extracted via workflow-plugin-hover#25). Custom HTTP client (not libdns) — no JSON struct-tag column. Cred-key shape stabilized post-extraction. Sequenced after that PR ships + tag pinned.
 
 ## NewAdapter switch (v2 final shape)
 
@@ -160,7 +166,7 @@ func NewAdapter(provider string, creds map[string]string) (dnspolicy.Adapter, er
 | Route53 | ChangeBatch (atomic CREATE/UPSERT/DELETE) — libdns `SetRecords` wraps as UPSERT | `SetRecords` direct (atomic upsert) | unit test: GetRecords → SetRecords idempotent |
 | GCP Cloud DNS | Changes API (atomic add/delete batch) — libdns `SetRecords` does delete-then-add internally | `SetRecords` direct | unit test: GetRecords → SetRecords replaces |
 | Azure DNS | RecordSet PUT (whole RRset replace per HTTP request) — libdns `SetRecords` direct map | `SetRecords` direct | unit test: GetRecords → SetRecords replaces |
-| Namecheap | `setHosts` replaces WHOLE ZONE — verify libdns wraps or whether merge-with-existing required | `UpsertTXT` must Get-merge-Set OR libdns does it; **gating verification** | integration-shape test: 2-record-zone, upsert 1 → other survives. If fails, adapter Get-merges before Set |
+| Namecheap | `setHosts` replaces whole zone — upstream `SetRecords` does Get-merge-Set per (name,type) internally (verified via source spike 2026-05-26 — RESOLVED, no adapter logic) | `SetRecords` direct | unit test: 3-record-zone + 1 foreign record, upsert 1 → foreign survives (stub `client.GetHosts/SetHosts`) |
 | GoDaddy | per-record PUT (record-level) — libdns `SetRecords` maps directly | `SetRecords` direct | unit test: GetRecords → SetRecords replaces |
 | Hover | scraped HTML (per-record CRUD) | `UpsertRecord` direct call | unit test against pkg/hoverclient stub |
 | DigitalOcean (v1) | per-record API requiring ID — libdns `SetRecords` requires ID + `AppendRecords` for new | DELETE-all + APPEND (RRset-replace dance, already shipped) | — |
@@ -182,7 +188,7 @@ Pre-merge verification rows are gating commits (test must pass) — caught early
 | 1 | Route53 | feat/dns-provider-v2-route53 | adapter + test + switch case + `docs/providers/route53.md` + `docs/providers/README.md` skeleton | — |
 | 2 | GCP Cloud DNS | feat/dns-provider-v2-gcp | adapter + test + switch case + `docs/providers/googleclouddns.md` | — |
 | 3 | Azure DNS | feat/dns-provider-v2-azure | adapter + test + switch case + `docs/providers/azuredns.md` | — |
-| 4 | Namecheap | feat/dns-provider-v2-namecheap | adapter + test + switch case + `docs/providers/namecheap.md` + whole-zone-replace verification commit | — |
+| 4 | Namecheap | feat/dns-provider-v2-namecheap | adapter + test (incl. foreign-record-survival case) + switch case + `docs/providers/namecheap.md` | — |
 | 5 | GoDaddy | feat/dns-provider-v2-godaddy | adapter + test + switch case + `docs/providers/godaddy.md` (with API-restriction warning) | — |
 | 6 | Hover | feat/dns-provider-v2-hover | adapter + test + switch case + `docs/providers/hover.md` | workflow-plugin-hover#25 (pkg/hoverclient extract + tag) |
 
@@ -195,20 +201,20 @@ PRs 1-5 are independently mergeable + parallelizable (no shared file). PR 6 sequ
 ## Assumptions
 
 - **A1**: libdns adapter packages (`route53 v1.6.2`, `googleclouddns v1.2.0`, `azure v0.5.0`, `namecheap v1.0.0`, `godaddy v1.1.0`) expose `GetRecords/SetRecords/AppendRecords/DeleteRecords` per `libdns.Record` interface (verified via `go doc` 2026-05-26 — all 5 provide this set).
-- **A2**: `ExpandCredsMap` correctly handles all value shapes (env-var substitution via `os.ExpandEnv` on each string value). Existing v1 behavior preserved.
+- **A2**: `ExpandCredsMap` (verified against `internal/dnsprovider/expand.go` source 2026-05-26): applies `os.ExpandEnv` to each string value. Per Go stdlib, `os.ExpandEnv` returns **empty string** for unset env vars (NOT the literal `$VAR`). So `access_key_id: $AWS_ACCESS_KEY_ID` with `AWS_ACCESS_KEY_ID` unset → empty string → adapter's empty-check correctly triggers ambient/MI fallback paths. Existing v1 behavior preserved.
 - **A3**: `workflow-plugin-hover` extraction (issue #25) is feasible — `internal/hover/client.go` (508 LOC) + `internal/hover/totp.go` (74 LOC) are stdlib-only HTTP client + TOTP. Clean move + visibility shift.
-- **A4**: Each provider's token scope is managed via the provider's own ACL (AWS IAM policies, GCP IAM roles, Azure RBAC, Namecheap API whitelist, GoDaddy keys, Hover user). Ownership gate is defense in depth, not primary auth.
+- **A4**: Provider-side token scope varies — see per-provider docs. AWS/GCP/Azure support fine-grained scoping (IAM policies, IAM roles, RBAC). Namecheap API key is account-wide. GoDaddy `api_token` is account-wide (no per-record scope). Hover `username+password` is full account login (no scoping). For providers without scoping, the ownership gate + audit log are the only barriers and owner-self impersonation IS possible — matches v1 design's honest framing. Gate is defense in depth, not primary auth.
 - **A5**: Unit tests with stub libdns providers (interface-satisfying mocks) are sufficient v2 validation (per user choice). Live integration tests deferred to v3.
 - **A6**: No proto changes (creds already `map[string]string` from v1 strict-contracts cutover).
 - **A7**: Cred-key names exactly match upstream struct JSON tags (verified 2026-05-26 — cycle-2 revision is the source of truth, not the cycle-1 invented names).
-- **A8**: Engine-side template-expansion errors (e.g., `{{ env "FOO" }}` resolving empty string) are scrubbed by the workflow engine's logger redaction layer. **Open question for verification**: spot-check `workflow` engine config-expansion path during PR 1 implementation; if not scrubbed, file followup.
-- **A9**: Namecheap whole-zone-replace risk is bounded by pre-merge gating verification (PR 4 RRset semantics test) — if upstream wraps adequately, no extra adapter code; if not, adapter implements Get-merge-Set. Either way, no zone wipe.
+- **A8**: Engine-side log redaction VERIFIED (`workflow/engine.go:826`, `:848`) — `module.RedactStepOutput` + `RedactionPlaceholder` scrub sensitive step inputs/outputs in debug logs. Existing test coverage at `engine_test.go:229` (TestEngineTriggerWorkflow_RedactsSensitiveResultsInDebugLogs) + `:271` (TestEngineTriggerWorkflow_RedactsSensitiveInputInDebugLogs). Adapter cred values benefit from same path automatically.
+- **A9**: Namecheap whole-zone-replace risk RESOLVED via upstream spike — see §"Cred contracts per provider – Namecheap" for source citation. No adapter logic; unit test locks contract.
 
-## Self-challenge — top 3 doubts (post cycle-2)
+## Self-challenge — top 3 doubts (post cycle-3)
 
-1. **GoDaddy ships dead code if 50-domain restriction is real for everyone.** Mitigation: PR 5 pre-merge test against a real GoDaddy account (any test API key) — if 403 universal, defer and drop PR 5. Adapter code is small + reversible.
-2. **Namecheap whole-zone-replace risk** could still slip through if test scenario isn't comprehensive. Mitigation: pre-merge verification commit in PR 4 must include a 3-record-zone-2-foreign-records integration-shape test (using stub upstream that records calls). Reviewer rejects PR 4 without this commit.
-3. **Hover sequencing.** PR 6 sits idle until hover#25 ships. If hover client extraction surfaces unexpected refactor surface (e.g., shared types across `internal/` and `pkg/`), the prereq slips. Acceptable — PRs 1-5 deliver bulk of v2 value; PR 6 ships in followup sweep when ready.
+1. **GoDaddy may ship dead code if 50-domain restriction blocks the user's account.** Mitigation: PR 5 ships adapter + warning in `docs/providers/godaddy.md`; no CI live test. Operator may smoke-test off-CI before tag. If 403 universal for user's account, deprecate GoDaddy switch case in v3 (rollback window applies).
+2. **Hover sequencing breaks user's "all equal priority" directive.** Accepted deferral — PRs 1-5 are bulk value; PR 6 waits on workflow-plugin-hover#25 + tag pin. Alternative considered: spike hover#25 in parallel with v2 design (cycle-2 reviewer Option 1). Rejected because hover client extraction surfaces unknown refactor surface and would block v2 main batch. PR 6 ships as followup sweep when hover#25 lands.
+3. **Aliases not in v2** (`aws` → `route53`, `gcp` → `googleclouddns`, `azure` → `azuredns`). YAGNI now. First consumer YAML that complains becomes the trigger. Documented in followups.
 
 ## Security Review
 
@@ -216,7 +222,7 @@ PRs 1-5 are independently mergeable + parallelizable (no shared file). PR 6 sequ
 |---|---|
 | auth/authz | Each provider's native ACL (IAM/RBAC/API-key whitelist). Gate is layer 2. |
 | secrets | Cred values via `map[string]string` already; never logged. Missing-cred errors name only the key. Per-provider error wrappers strip values. |
-| engine log scrubbing | Open question (A8). Spot-check during PR 1; file followup if unverified. |
+| engine log scrubbing | RESOLVED (A8) — workflow/engine.go uses `module.RedactStepOutput` + `RedactionPlaceholder`. Existing test coverage in engine_test.go. |
 | PII/logging | No PII in cred maps. Audit log (v1) records owner + operation only. |
 | abuse case | Compromised cred = compromised provider account. Gate stops cross-owner mutation within the compromised scope, but cannot stop owner-self exfiltration. Documented in v1 trust model. |
 | deps/trust | 5 new libdns adapter modules (all maintained by libdns org) + 1 new internal dep (`pkg/hoverclient` from our own org). Supply-chain risk audited via go.sum + workflow-plugin-supply-chain. Post-merge: count go.sum delta; if >300 lines, file build-tag-isolation followup. |
@@ -246,7 +252,7 @@ Per v2 unit-test-only strategy:
 - Per-PR revert. Each adapter is independent. Reverting PR N removes that provider from supported set; `NewAdapter` returns "unknown provider" error for its key.
 - No data migration. No DNS-side state changes from these PRs alone (adapters are infrastructure for future YAML-driven applies).
 - Go module pin rollback handled by `go.mod` revert.
-- **Rollback window assumption**: PR-N may be safely reverted only while zero pipelines reference its provider key in YAML. Once a YAML pins `provider: <key>`, removal is a breaking change requiring deprecation cycle. Documented in `docs/providers/README.md` as a stability note.
+- **Rollback window assumption**: PR-N may be safely reverted only while zero pipelines reference its provider key in YAML. Once a YAML pins `provider: <key>`, removal is a breaking change. **Deprecation cycle (per workspace minEngineVersion + plugin minor-version convention)**: removed provider key emits warning log on `NewAdapter` call for 1 minor version, then errors. Plugin minor bump documents removal in CHANGELOG. Documented in `docs/providers/README.md` as a stability note.
 
 ## Out of scope
 
@@ -256,10 +262,11 @@ Per v2 unit-test-only strategy:
 - New providers beyond the 6 listed (Vultr, Linode, NS1, etc.)
 - Cloudflare migration to multi-cred (v1 single-token still works; refactor optional)
 - WhoAmI for token-bound owner verification (v2 followup)
-- Provider aliases (`aws`/`gcp`/`azure` shorthand) — deferred to v3
+- Provider aliases (`aws`/`gcp`/`azure` shorthand → `route53`/`googleclouddns`/`azuredns`) — deferred to v3; first consumer YAML complaint triggers add
 - AWS assume-role chain (`assume_role_arn`) — deferred to v3
 - GCP inline JSON cred form — deferred to v3
 - Build-tag per-provider isolation — followup if go.sum delta > 300
+- GoDaddy CHANGELOG-tracked stability if 50-domain restriction makes adapter unusable — deprecate per rollback policy
 
 ## Followups (filed post-merge)
 
