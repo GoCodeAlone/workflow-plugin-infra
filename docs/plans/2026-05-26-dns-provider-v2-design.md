@@ -99,9 +99,9 @@ If `service_account_path` empty → libdns uses Application Default Credentials 
 | `client_id` | `ClientId` (`client_id`) | optional* |
 | `client_secret` | `ClientSecret` (`client_secret`) | optional* |
 
-*Auth modes (per upstream docs):
-- **Service principal**: ALL of `tenant_id` + `client_id` + `client_secret` set.
-- **Managed identity**: ALL of `tenant_id` + `client_id` + `client_secret` empty. Upstream uses ambient Azure managed identity.
+*Auth modes (per upstream `libdns/azure v0.5.0` godoc — verified 2026-05-26 via `go doc github.com/libdns/azure.Provider`):
+- **Service principal**: ALL of `tenant_id` + `client_id` + `client_secret` set. Each godoc says "Required only when authenticating using a service principal with a secret."
+- **Managed identity**: ALL of `tenant_id` + `client_id` + `client_secret` empty. Each godoc says "Do not set any value to authenticate using a managed identity."
 
 Adapter enforces: either all three set or all three empty. Mixed (2 set + 1 empty) → reject with error naming the missing key.
 
@@ -161,16 +161,18 @@ func NewAdapter(provider string, creds map[string]string) (dnspolicy.Adapter, er
 
 ## RRset semantics per provider (informs UpsertTXT / UpsertRecord implementation)
 
-| provider | upstream model | adapter UpsertTXT shape | pre-merge verification |
-|---|---|---|---|
-| Route53 | ChangeBatch (atomic CREATE/UPSERT/DELETE) — libdns `SetRecords` wraps as UPSERT | `SetRecords` direct (atomic upsert) | unit test: GetRecords → SetRecords idempotent |
-| GCP Cloud DNS | Changes API (atomic add/delete batch) — libdns `SetRecords` does delete-then-add internally | `SetRecords` direct | unit test: GetRecords → SetRecords replaces |
-| Azure DNS | RecordSet PUT (whole RRset replace per HTTP request) — libdns `SetRecords` direct map | `SetRecords` direct | unit test: GetRecords → SetRecords replaces |
-| Namecheap | `setHosts` replaces whole zone — upstream `SetRecords` does Get-merge-Set per (name,type) internally (verified via source spike 2026-05-26 — RESOLVED, no adapter logic) | `SetRecords` direct | unit test: 3-record-zone + 1 foreign record, upsert 1 → foreign survives (stub `client.GetHosts/SetHosts`) |
-| GoDaddy | per-record PUT (record-level) — libdns `SetRecords` maps directly | `SetRecords` direct | unit test: GetRecords → SetRecords replaces |
-| Hover | scraped HTML (per-record CRUD) | `UpsertRecord` direct call | unit test against pkg/hoverclient stub |
-| DigitalOcean (v1) | per-record API requiring ID — libdns `SetRecords` requires ID + `AppendRecords` for new | DELETE-all + APPEND (RRset-replace dance, already shipped) | — |
-| Cloudflare (v1) | per-record API — libdns `SetRecords` matches on name+type | `SetRecords` direct | — |
+| provider | upstream model | adapter UpsertTXT shape | why `SetRecords` direct works (or doesn't) | pre-merge verification |
+|---|---|---|---|---|
+| Route53 | ChangeBatch atomic CREATE/UPSERT/DELETE | `SetRecords` direct | ChangeBatch UPSERT is record-ID-free; libdns maps to atomic RRset replace | unit test: GetRecords → SetRecords idempotent |
+| GCP Cloud DNS | Changes API (atomic add/delete batch) | `SetRecords` direct | libdns does delete-then-add internally; record-ID-free | unit test: GetRecords → SetRecords replaces |
+| Azure DNS | RecordSet PUT (whole RRset replace per HTTP request) | `SetRecords` direct | Azure RecordSet API itself is RRset-replace; record-ID-free | unit test: GetRecords → SetRecords replaces |
+| Namecheap | `setHosts` whole-zone replace | `SetRecords` direct | upstream `SetRecords` does Get-merge-Set per (name,type) internally (source spike 2026-05-26); same-(name,type) records not in desired set are removed; foreign (name,type) preserved | unit test: 3-record-zone (2 same name+type + 1 foreign), upsert 1 → 1 same-(name,type) removed + foreign survives |
+| GoDaddy | per-record PUT (record-level) | `SetRecords` direct | libdns/godaddy `SetRecords` maps name+type without requiring record ID | unit test: GetRecords → SetRecords replaces |
+| Hover | scraped HTML (per-record CRUD) | `UpsertRecord` direct call | custom client; no SetRecords abstraction; per-record CRUD only | unit test against pkg/hoverclient stub |
+| DigitalOcean (v1) | per-record API requiring ID | DELETE-all + APPEND (RRset-replace dance, already shipped) | libdns/digitalocean `SetRecords` REQUIRES existing record ID — does NOT work for new records or RRset replacement. v1 chose DELETE+APPEND. v2 providers above are different — `SetRecords` works without ID for those libdns wrappers. | — |
+| Cloudflare (v1) | per-record API | `SetRecords` direct | libdns/cloudflare matches on name+type without ID requirement | — |
+
+**Key asymmetry callout**: v1's DigitalOcean adapter deliberately avoids `SetRecords` because libdns/digitalocean requires record IDs. v2 providers can trust `SetRecords` because their libdns wrappers (route53/googleclouddns/azure/namecheap/godaddy) either expose ID-free RRset semantics or internally Get-merge-Set. Each v2 adapter's unit test exercises the round-trip without relying on existing IDs — this proves the asymmetry empirically per provider.
 
 Pre-merge verification rows are gating commits (test must pass) — caught early in PR review, not at runtime.
 
