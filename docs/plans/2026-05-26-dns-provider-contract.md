@@ -1098,33 +1098,45 @@ func runInfraImportAllWithDeps(ctx context.Context, provider interfaces.IaCProvi
 ```go
 // resolveProviderModuleByName resolves an iac.provider module by name,
 // returning the plugin discriminator (from modCfg["provider"]) and the
-// fully-resolved module config. Mirrors resolveProviderForSpec but
-// indexes by module name instead of by spec's provider reference.
-func resolveProviderModuleByName(cfgFile, envName, name string) (providerType string, providerCfg map[string]any, err error) {
-    cfg, err := config.LoadFromFile(cfgFile) // single arg — verified infra.go:221
-    if err != nil { return "", nil, fmt.Errorf("load config: %w", err) }
-    for _, m := range cfg.Modules {
-        if m.Name != name || m.Type != "iac.provider" {
+// fully-resolved module config. Mirrors resolveProviderForSpec line-for-line
+// (workflow/cmd/wfctl/infra.go:1150-1180) but indexes by module name
+// instead of by spec's provider reference.
+func resolveProviderModuleByName(cfgFile, envName, name string) (string, map[string]any, error) {
+    cfg, err := config.LoadFromFile(cfgFile)
+    if err != nil {
+        return "", nil, fmt.Errorf("load %s: %w", cfgFile, err)
+    }
+    for i := range cfg.Modules {                 // index-range to allow pointer-to-element
+        m := &cfg.Modules[i]                     // pointer needed for m.ResolveForEnv (pointer receiver)
+        if m.Type != "iac.provider" || m.Name != name {
             continue
         }
-        resolved, rerr := m.ResolveForEnv(envName) // env-override handling, matches infra.go:1165
-        if rerr != nil { return "", nil, fmt.Errorf("resolve env %q for module %q: %w", envName, name, rerr) }
-        modCfg, _ := config.ExpandEnvInMapPreservingKeys(resolved.Config, infraPreserveKeys)
-        provType, _ := modCfg["provider"].(string)
-        if provType == "" {
-            return "", nil, fmt.Errorf("module %q missing 'provider' field in config", name)
+        var modCfg map[string]any
+        if envName != "" {
+            resolved, ok := m.ResolveForEnv(envName) // returns (*ResolvedModule, bool)
+            if !ok {
+                return "", nil, fmt.Errorf("provider module %q is disabled for environment %q", name, envName)
+            }
+            modCfg = config.ExpandEnvInMapPreservingKeys(resolved.Config, infraPreserveKeys)
+        } else {
+            modCfg = config.ExpandEnvInMapPreservingKeys(m.Config, infraPreserveKeys)
         }
-        return provType, modCfg, nil
+        providerType, _ := modCfg["provider"].(string)
+        if providerType == "" {
+            return "", nil, fmt.Errorf("provider module %q has no 'provider' type configured", name)
+        }
+        return providerType, modCfg, nil
     }
     return "", nil, fmt.Errorf("no iac.provider module named %q in config", name)
 }
 ```
 
-Two corrections vs. cycle-5 draft:
-1. `loadConfig(cfgFile, envName)` doesn't exist; real function is `config.LoadFromFile(cfgFile)` (single arg). Env-override is per-module via `m.ResolveForEnv(envName)`.
-2. `m.Type` is always exactly `"iac.provider"` (not `"iac.provider.<sub>"`). Plugin discriminator lives in `modCfg["provider"].(string)` — same pattern as `resolveProviderForSpec` at line 1174.
+Three precise corrections vs. cycle-6 draft (each verified by reading `resolveProviderForSpec` source):
+1. **Range over index** (`for i := range cfg.Modules` + `m := &cfg.Modules[i]`) — `ResolveForEnv` has pointer receiver `*ModuleConfig`; ranging by value would copy + can't address.
+2. **`ResolveForEnv` returns `(*ResolvedModule, bool)`** — not `(*ResolvedModule, error)`. Guard via `if !ok`.
+3. **`ExpandEnvInMapPreservingKeys` returns single `map[string]any`** — not `(map, error)`. Single-value assignment.
 
-Alternative: delegate to existing `resolveProviderForSpec` by synthesizing a `ResourceSpec{Config: map[string]any{"iac_provider": name}}` — verify the spec-side lookup pattern at implementation time before choosing inline helper vs. delegation.
+Plus `envName == ""` branch handles the no-env case using `m.Config` directly (same pattern as `resolveProviderForSpec:1171-1172`).
 
 In `runInfraImportAll`:
 
@@ -2121,6 +2133,7 @@ Design: workflow-plugin-infra/docs/plans/2026-05-26-dns-provider-contract-design
 | Date | Author | Change |
 |---|---|---|
 | 2026-05-26 | codingsloth@pm.me | Initial plan draft (cycle 1). Mirrors design cycle 3.5. 8 PRs, 32 tasks, 6 repos. |
+| 2026-05-26 | codingsloth@pm.me | Plan cycle 7 — addresses 3 compile errors in cycle-6 helper. (C1-C3-CYCLE6) `resolveProviderModuleByName` helper rewritten as exact line-for-line mirror of existing `resolveProviderForSpec` (`workflow/cmd/wfctl/infra.go:1150-1180`) after reading the actual source. Fixes: (a) `for i := range cfg.Modules` + `m := &cfg.Modules[i]` (pointer receiver requires addressable element, range-by-value can't satisfy); (b) `resolved, ok := m.ResolveForEnv(envName)` with `if !ok` guard (returns `(*ResolvedModule, bool)` not `error`); (c) `modCfg := config.ExpandEnvInMapPreservingKeys(...)` single-value assignment (returns `map[string]any`, not `(map, error)`); (d) added `envName == ""` branch using `m.Config` directly. |
 | 2026-05-26 | codingsloth@pm.me | Plan cycle 6 — addresses adversarial cycle 5 findings (all 3 fact-verified before applying). (C1-CYCLE5) `resolveProviderModuleByName` was returning `m.Type` (always literal `"iac.provider"`) but the caller needs the plugin discriminator from `modCfg["provider"].(string)` — verified by reading `resolveProviderForSpec` at `infra.go:1174`. Helper rewritten to mirror the existing function's resolution pattern including `m.ResolveForEnv(envName)` + `config.ExpandEnvInMapPreservingKeys(...)`. (C2-CYCLE5) `loadConfig(cfgFile, envName)` doesn't exist; corrected to `config.LoadFromFile(cfgFile)` (single arg) — verified `infra.go:221`. (I1-CYCLE5) `--plugin-dir` is per-subcommand flag not global — verified at `infra.go:258-259`. Switched all scenario run.sh scripts to use `export WFCTL_PLUGIN_DIR=/tmp` env var at top (verified env var support same line). Cleaner than per-invocation flag. |
 | 2026-05-26 | codingsloth@pm.me | Plan cycle 5 — addresses adversarial cycle 4 findings (verified facts against actual repos before applying). (C1-CYCLE4) workflow-registry layout: `plugins/<short-name>/manifest.json` (NO `workflow-plugin-` prefix; verified by `ls plugins/`). Cloudflare DOES NOT exist in registry today — Task 13.5 reframed as `plugins/cloudflare/manifest.json` CREATE + 3 existing modifies. `validate-manifests.sh` path is `scripts/validate-manifests.sh` (verified). (C2-CYCLE4) `interfaces.IaCProvider.Import` returns `(*ResourceState, error)` not `(*ResourceOutput, error)` (verified iac_provider.go:30). Task 15 importFn stub + Task 29 stub plugin Import method both corrected. (I1-CYCLE4) Task 32 jq paths corrected: `.applied_config.records` not `.config.records` (ResourceState field tag is `json:"applied_config"` per iac_state.go:37); operator position fixed for length check. (I2-CYCLE4) `--provider` semantic explicitly specified: module name, not plugin type. `resolveProviderModuleByName` helper specified inline (~12 LOC). (M3) `--plugin-dir=/tmp` added to all `wfctl infra apply` + `wfctl infra import-all` invocations in scenario run.sh scripts. |
 | 2026-05-26 | codingsloth@pm.me | Plan cycle 4 — addresses adversarial cycle 3 findings. (C1-CYCLE3) `wfctl infra apply` has NO `--provider` flag — provider derives from config's `iac.provider` module. Task 31 reworked to paired source/target config pattern (no translate script). (I1-CYCLE3) workflow-registry stores manifests at `plugins/<name>/manifest.json`, NOT `manifests/*.yaml`. Task 13.5 paths + format corrected; uses repo's own `validate-manifests.sh` for preflight. (I2-CYCLE3) `sleep 5` dropped; PR number captured atomically from `gh pr create` stdout. (I3-CYCLE3) `translate-state-to-config.py` helper deleted entirely (reviewer Option 2 — paired fixture+config pair eliminates state→config schema gap). (M1) `sed -i ''` BSD-only → `perl -pi -e` for portability across Tasks 19/20/21. (M2) stub plugin Import method now has explicit YAML fixture lookup implementation, not a TODO placeholder. |
