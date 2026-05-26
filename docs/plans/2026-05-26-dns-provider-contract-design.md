@@ -109,6 +109,7 @@ This is a thin wrapper around existing primitives; no new gRPC, no new contract.
   - For policy R/W: calls `driver.Read(zoneRef)` → parses TXT records via `workflow/dns/policy` → mutates → calls `driver.Update(zoneRef, updatedSpec)`. Operates against the EXISTING strict-contract `IaCResourceDriver` surface — no new RPCs.
 - **Extend `ApplyPlanHooks` with a pre-action gate slot.** Current `ApplyPlanHooks` (`workflow/iac/wfctlhelpers/apply.go:91`) has only `OnResourceApplied`, `OnResourceDeleted`, `OnPlanComplete` — all post-action. Phase 3a explicitly adds `OnBeforeAction func(ctx context.Context, action interfaces.PlanAction) error` to `ApplyPlanHooks`. A non-nil error returned from `OnBeforeAction` aborts the per-action dispatch before the driver call. Callers that construct `ApplyPlanHooks` literals get updated to pass `nil` for the new field (no behavior change) except for the dns-gate wiring which sets it explicitly. Existing test coverage in `apply_test.go` extended with a pre-action-abort case. This is a first-class wfctl change, not an incidental assumption — promoted from cycle-2 A4.
 - Wire the dns-gate as the `OnBeforeAction` implementation for any `infra.dns` resource action (Create/Update). Gate failure → action aborted before driver call.
+- **`OnBeforeAction` error semantics** (cycle-3 I-NEW-2): a non-nil error returned from `OnBeforeAction` is FATAL — it aborts the entire `applyPlanWithEnvProviderAndHooks` loop immediately, matching the `fatalErr` tier in the existing per-action error model (`apply.go:281-425`). Rationale: DNS ownership policy denial is a hard-stop. Continuing to apply other resources in the same plan after a contested-ownership zone is silently skipped would mask intent and risk inconsistent state across the plan. Best-effort (`iterErr`) semantics are explicitly NOT used for the gate.
 
 **Phase 3b — workflow-plugin-infra strip (1 PR, workflow-plugin-infra)**:
 
@@ -133,13 +134,21 @@ github.com/libdns/azure
 github.com/libdns/godaddy   (if present after v2)
 ```
 
-The `infra.dns_record` typed step's handler at `internal/plugin.go:149-165` (caller-list confirmed by cycle-2 grep) — that handler currently calls `dnsprovider.ExpandCredsMap` (line 149), `dnsprovider.NewAdapter` (line 150), and `dnsprovider.Apply` (line 165). Migration entails three coupled changes:
+The `infra.dns_record` typed step's handler at `internal/plugin.go:149-165` (caller-list confirmed by cycle-2 grep) — that handler currently calls `dnsprovider.ExpandCredsMap` (line 149), `dnsprovider.NewAdapter` (line 150), and `dnsprovider.Apply` (line 165). Cycle-3 adversarial (I-NEW-1) confirmed that the rewrite path requires `engine.ResolveProvider(ref)` to be callable from inside a plugin-process step handler — and that primitive does not exist in the SDK today. `sdk.TypedStepRequest[C, I]` (`workflow/plugin/external/sdk/typed.go:22-30`) carries no app handle or peer-plugin resolver. The cycle-2 rewrite plan (provider_ref + composite upsert from inside the step) is therefore architecturally unsupported.
 
-1. **Proto contract break for `DNSRecordStepConfig`** (`internal/contracts/infra.proto:158`): drop the `map<string, string> provider_creds = 2;` field; replace with `string provider_ref = 2;` carrying the name of the infra-config-declared provider module (e.g., `"cloudflare"`). The step handler resolves the provider via engine context lookup against this ref, never carrying creds inline. Per user direction ("don't worry about maintaining compatibility, nothing actively uses the DNS functionality currently"), this is a clean field break — no deprecation cycle, no backward-compat shim. workflow-plugin-infra ships a major version bump capturing the contract break.
-2. **Step handler rewrite**: replace `dnsprovider.NewAdapter` with `engine.ResolveProvider(req.Config.ProviderRef)` → `provider.ResourceDriver("infra.dns")`. The pattern lives in `workflow/module/pipeline_step_*.go` for other IaC-touching typed steps; cite the precedent at implementation time.
-3. **`upsert` semantic via composite Read→Create-or-Update**: existing step config supports `operation=upsert` (create-or-update). `IaCResourceDriver` does not have a single primitive for this — `Create` returns error on conflict and `Update` requires existing resource. Composite implementation: handler calls `driver.Read(zoneRef)`; if record matching (type, name) exists in returned state, dispatches `driver.Update(zoneRef, updatedSpec)` with the modified records list; if absent, dispatches the equivalent Create path. Whole-zone-replace semantics dominate at the driver level anyway (NC requires it; CF/DO behave equivalently via libdns wrapper) — the composite is honest about the semantics. Document in handler comments.
+**Cycle-3 resolution**: deprecate and remove the `infra.dns_record` step type entirely in Phase 3b. Per user direction ("don't worry about maintaining compatibility, nothing actively uses the DNS functionality currently"), removal is sanctioned. The step's role — per-record DNS mutation inside a workflow pipeline — is fulfilled by either:
 
-After the rewrite, the step handler holds no libdns/* import and no inline creds.
+- `wfctl infra apply` with a per-record `infra.dns` config (the engine-native record-level path; uses the existing strict-contract driver), or
+- `wfctl dns-policy *` commands for policy-related record changes (post-Phase 3a), or
+- direct provider-plugin invocation via pipeline `step.iac.<provider>.dns` if a per-step DNS mutation surface is needed in a future design (separate proposal).
+
+Phase 3b actions:
+1. DELETE the `infra.dns_record` step type registration from `internal/plugin.go`.
+2. DELETE the `DNSRecordStepConfig` message from `internal/contracts/infra.proto` (and its generated stubs).
+3. workflow-plugin-infra `plugin.json` drops `infra.dns_record` from `capabilities.stepTypes`.
+4. workflow-plugin-infra ships a major version bump capturing the step removal + the libdns strip.
+
+After Phase 3b, the step handler does not exist; the libdns coupling is genuinely gone. Any future per-record-step requirement triggers a new design, scoped against the SDK primitives that exist at that time (or motivates a workflow SDK extension adding `engine.ResolveProvider` to typed step request — out of scope here).
 
 Update `plugin.json`:
 - Remove `cliCommands` entry for `infra-dns` (commands moved to wfctl builtins).
@@ -163,16 +172,21 @@ Test runner gating: scenarios that require live cloud creds opt in via env (`WOR
 
 **Stub provider gRPC plugin harness — new infrastructure in PR 8 scope.** Cycle-2 adversarial confirmed that workflow-scenarios's existing mocks are HTTP-API mocks (Twilio, LaunchDarkly, etc.), NOT gRPC plugin processes conforming to `iac.proto`. PR 8 explicitly builds a minimal stub IaCProvider plugin at `workflow-scenarios/dns/stub-plugin/`: a small Go binary that uses `sdk.ServeIaCPlugin` and answers `EnumerateAll`/`Import` from a YAML-fixture file. The harness pattern is small (existing workflow internal-tests have similar test plugins under `workflow/plugin/external/sdk/serve_full_test.go` and adjacent test scaffolding — that scaffolding can be cribbed). The stub plugin is the load-bearing piece that makes the import-export-roundtrip and delegation scenarios runnable in CI without live creds.
 
-**Cross-provider transfer lossiness charter** (Phase 4 scenario 2): the scenario asserts equality on `(type, name, data, ttl)` only. Provider-specific extras are KNOWN-lossy and explicitly excluded from assertion. Documented exclusion list per provider, used as field-skip masks by the test runner:
+**Cross-provider transfer lossiness charter** (Phase 4 scenario 2): the scenario asserts equality on `(type, name, data, ttl)` only. Provider-specific extras are KNOWN-lossy and excluded per `(provider, record_type, field)` triple (NOT globally per provider — extras are record-type-specific). Charter table:
 
-| provider | excluded fields (lossy on transfer) |
-|---|---|
-| cloudflare | `proxied` |
-| namecheap | `email_type`, `is_using_our_dns` |
-| digitalocean | `weight`, `port`, `flags`, `tag` (SRV/CAA extras) |
-| hover | (none currently identified) |
+| provider | record type | excluded fields |
+|---|---|---|
+| cloudflare | any | `proxied` |
+| namecheap | any | `email_type`, `is_using_our_dns` (zone-level extras propagated into record metadata) |
+| digitalocean | SRV | `weight`, `port` |
+| digitalocean | CAA | `flags`, `tag` |
+| hover | any | (none currently identified) |
 
-Future record-type extensions to this list happen in the scenario's `lossiness.yaml` config; not blocking design progression. Scenarios surface unexpected-loss failures (a field present at provider A that A's importer drops silently) by importing-then-applying-back-to-A and checking the diff — that is import-export-roundtrip (scenario 1), separate from cross-provider transfer (scenario 2).
+The scenario test runner uses a `(provider, record_type) → []fieldName` map for assertion-time field-skip. Encountering a record type not in the charter (e.g., NAPTR, HTTPS) with non-empty extras flags an `unknown-extras` warning and the scenario decides per-record whether to fail or extend the charter.
+
+**NS records excluded from transfer matrix**. Apex NS records at a zone are provider-managed (assigned by the registrar/DNS host); they cannot transfer intact across providers by definition. The Phase 4 cross-provider-transfer scenario matrix is `A, AAAA, CNAME, MX, TXT, SRV, CAA` — NS omitted. (NS records for delegated subdomains are exercised separately in Phase 4 scenario 3, the delegation scenario.)
+
+Scenarios surface unexpected-loss failures (a field present at provider A that A's importer drops silently) by importing-then-applying-back-to-A and checking the diff — that is import-export-roundtrip (scenario 1), separate from cross-provider transfer (scenario 2).
 
 **Multi-provider single-config apply** (Phase 4 scenario 3 — delegation): two `infra.dns` resources in one config, each bound to a different `iac.provider.*` module. Pattern precedent: `workflow-scenarios/scenarios/66-iac-multi-cloud/` already demonstrates multi-cloud resources in a single config; the delegation scenario follows the same shape with two DNS-capable providers.
 
@@ -283,7 +297,7 @@ Same RPC surface (`IaCResourceDriver.Read` + `Update`), already part of the stri
 - workflow-plugin-infra gets a major version bump (capability surface shrinks: cliCommands removed + module/step factories may change; concrete diff at Phase 3b time).
 - No DB migrations. No new cloud resources. No production deploy.
 - Live tests require self-hosted runner static egress (NC IP allowlist + responsible-rate-limit posture).
-- One state-trail path migration in Phase 3a (`${XDG_STATE_HOME}/wfctl/plugins/infra/dns-audit.jsonl` → `${XDG_STATE_HOME}/wfctl/dns-audit.jsonl`); first wfctl run after upgrade appends old trail to new + leaves old file in place for one release cycle then removed in a follow-up.
+- One state-trail path migration in Phase 3a (`${XDG_STATE_HOME}/wfctl/plugins/infra/dns-audit.jsonl` → `${XDG_STATE_HOME}/wfctl/plugins/wfctl/dns-audit.jsonl` — design-guidance canonical `<plugin>` segment uses `wfctl` for wfctl-builtin commands); first wfctl run after upgrade appends old trail to new + leaves old file in place for one release cycle then removed in a follow-up.
 
 ## Rollback
 
@@ -333,3 +347,4 @@ Same RPC surface (`IaCResourceDriver.Read` + `Update`), already part of the stri
 | 2026-05-26 | codingsloth@pm.me | cycle 1 — peer-contract architecture (DNSProvider gRPC service in workflow-plugin-infra w/ peer-dispatch via EngineCallbackService). Adversarial review FAIL: 3 Criticals (peer-dispatch RPC absent; missed caller in `infra.dns_record` step handler; reserved-command name collision). |
 | 2026-05-26 | codingsloth@pm.me | cycle 2 — full architectural pivot. Drops new contract entirely. Uses engine-native `wfctl infra import` + `IaCProviderEnumerator.EnumerateAll` strict-contract path. Restructures as 5 phases: (1) EnumerateAll across 4 providers, (2) wfctl import-all wrapper, (3) policy code relocated workflow-plugin-infra → wfctl, (4) workflow-scenarios DNS orchestration, (5) pointer to separate gocodealone-dns design. Adversarial FAIL: 3 Criticals (Hover ListDomains missing, ApplyPlanHooks lacks pre-action slot, `DNSRecordStepConfig.provider_creds` stranded + `upsert` semantic mismatch). |
 | 2026-05-26 | codingsloth@pm.me | cycle 3 — targeted fixes for cycle-2 findings. (C1) Phase 1 Hover PR explicitly adds `ListDomains` method to `pkg/hoverclient`. (C2) Phase 3a explicitly adds `OnBeforeAction` to `ApplyPlanHooks`; promotes A4 from assumption to design decision. (C3) Phase 3b breaks `DNSRecordStepConfig.provider_creds` proto contract; replaces with `provider_ref`; documents composite Read→Create-or-Update upsert. (I1) Phase 4 PR 8 scope explicitly includes building stub IaCProvider gRPC plugin harness; lossiness charter listing excluded fields per provider. (I2) design-guidance §CLI clarified in same change set: cross-cutting orchestration → wfctl builtin; capability-scoped → plugin cliCommands. (I4) rollback rationale order fixed. (M1) audit path normalized to `${XDG_STATE_HOME}/wfctl/plugins/wfctl/dns-audit.jsonl`. (M2) PR count corrected to 8. (M3) cite scenario 66 precedent for delegation multi-provider apply. |
+| 2026-05-26 | codingsloth@pm.me | cycle 3.5 — final fixes for cycle-3 adversarial findings. (I-NEW-1) cycle-3 step handler rewrite via `engine.ResolveProvider` was architecturally unsupported (no SDK primitive in plugin-process step handler context). Resolution: Phase 3b removes the `infra.dns_record` step type entirely; per-record workflows migrate to `wfctl infra apply` or `wfctl dns-policy *`. (I-NEW-2) `OnBeforeAction` error tier specified as FATAL (aborts the apply loop), not best-effort, so DNS ownership denial is a hard-stop. (M-NEW-1) lossiness charter restructured as `(provider, record_type, field)` triples — record-type-specific extras (DO SRV `weight`/`port`, DO CAA `flags`/`tag`) not applied globally. (M-NEW-2) audit path typo fixed in §Infrastructure Impact (matches Phase 3a description). (M-NEW-3) NS records excluded from cross-provider transfer matrix (apex NS provider-managed by definition). Adversarial PASS conditional on these design-constraint additions. |
