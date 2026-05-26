@@ -1941,7 +1941,7 @@ go build -o /tmp/dns-stub ../../lib/dns-stub-plugin/
 export WFCTL_PLUGIN_DIR=/tmp
 # wfctl invocation: import-all then plan, assert plan is no-op
 if wfctl infra import-all --config=../config/app.yaml --provider=stub --type=infra.dns; then PASS=$((PASS+1)); else FAIL=$((FAIL+1)); fi
-if wfctl --plugin-dir=/tmp infra plan --config=../config/app.yaml > /tmp/plan.txt; then PASS=$((PASS+1)); else FAIL=$((FAIL+1)); fi
+if wfctl infra plan --config=../config/app.yaml > /tmp/plan.txt; then PASS=$((PASS+1)); else FAIL=$((FAIL+1)); fi
 if grep -q "No changes" /tmp/plan.txt; then PASS=$((PASS+1)); else FAIL=$((FAIL+1)); fi
 echo "PASS=$PASS FAIL=$FAIL SKIP=$SKIP"
 [ $FAIL -eq 0 ]
