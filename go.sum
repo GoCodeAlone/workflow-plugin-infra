@@ -47,6 +47,8 @@ github.com/aws/aws-sdk-go-v2/service/internal/presigned-url v1.13.22 h1:PUmZeJU6
 github.com/aws/aws-sdk-go-v2/service/internal/presigned-url v1.13.22/go.mod h1:nO6egFBoAaoXze24a2C0NjQCvdpk8OueRoYimvEB9jo=
 github.com/aws/aws-sdk-go-v2/service/kinesis v1.43.4 h1:3m9iJtMtLq75jKRAfw0kapoHUlbzi0CRVigysBN/FHA=
 github.com/aws/aws-sdk-go-v2/service/kinesis v1.43.4/go.mod h1:O2L6vGm4xacEuN2otHFMgn7yXXlgzFKzxrba0fy/yk8=
+github.com/aws/aws-sdk-go-v2/service/route53 v1.58.3 h1:jQzRC+0eI/l5mFXVoPTyyolrqyZtKIYaKHSuKJoIJKs=
+github.com/aws/aws-sdk-go-v2/service/route53 v1.58.3/go.mod h1:1GNaojT/gG4Ru9tT39ton6kRZ3FvptJ/QRKBoqUOVX4=
 github.com/aws/aws-sdk-go-v2/service/signin v1.0.10 h1:a1Fq/KXn75wSzoJaPQTgZO0wHGqE9mjFnylnqEPTchA=
 github.com/aws/aws-sdk-go-v2/service/signin v1.0.10/go.mod h1:p6+MXNxW7IA6dMgHfTAzljuwSKD0NCm/4lbS4t6+7vI=
 github.com/aws/aws-sdk-go-v2/service/sso v1.30.16 h1:x6bKbmDhsgSZwv6q19wY/u3rLk/3FGjJWyqKcIRufpE=
@@ -238,6 +240,8 @@ github.com/libdns/digitalocean v0.0.0-20250606071607-dfa7af5c2e31 h1:raIuvxYVJtZ
 github.com/libdns/digitalocean v0.0.0-20250606071607-dfa7af5c2e31/go.mod h1:hde/tjNiPFe1lLaf2TtaCAYgJ9j/SGLhaQMpgZlF6e0=
 github.com/libdns/libdns v1.1.1 h1:wPrHrXILoSHKWJKGd0EiAVmiJbFShguILTg9leS/P/U=
 github.com/libdns/libdns v1.1.1/go.mod h1:4Bj9+5CQiNMVGf87wjX4CY3HQJypUHRuLvlsfsZqLWQ=
+github.com/libdns/route53 v1.6.2 h1:unPlpgC2InQ/xrql5NOwCmFS9vZrRx8lH1WUo8/rjk8=
+github.com/libdns/route53 v1.6.2/go.mod h1:7QGcw/2J0VxcVwHsPYpuo1I6IJLHy77bbOvi1BVK3eE=
 github.com/mattn/go-colorable v0.1.9/go.mod h1:u6P/XSegPjTcexA+o6vUJrdnUu04hMope9wVRipJSqc=
 github.com/mattn/go-colorable v0.1.12/go.mod h1:u5H1YNBxpqRaxsYJYSkiCWKzEfiAb1Gb520KVy5xxl4=
 github.com/mattn/go-colorable v0.1.14 h1:9A9LHSqF/7dyVVX6g0U9cwm9pG3kP9gSzcuIPHPsaIE=

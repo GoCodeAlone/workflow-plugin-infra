@@ -10,6 +10,11 @@ import (
 	"github.com/libdns/libdns"
 )
 
+func init() { Register("digitalocean", newDigitalOceanAdapter) }
+
+// Compile-time interface check.
+var _ dnspolicy.Adapter = (*doAdapter)(nil)
+
 type doAdapter struct {
 	provider *libdnsdo.Provider
 }

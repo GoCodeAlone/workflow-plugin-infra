@@ -10,6 +10,11 @@ import (
 	"github.com/libdns/libdns"
 )
 
+func init() { Register("cloudflare", newCloudflareAdapter) }
+
+// Compile-time interface check.
+var _ dnspolicy.Adapter = (*cfAdapter)(nil)
+
 type cfAdapter struct {
 	provider *libdnscf.Provider
 }
