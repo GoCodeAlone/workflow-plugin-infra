@@ -1093,23 +1093,38 @@ func runInfraImportAllWithDeps(ctx context.Context, provider interfaces.IaCProvi
 
 **Step 3: Wire CLI wrapper to deps + test + commit**
 
-`--provider` semantic (cycle-4 finding I2): `providerName` is the `iac.provider.*` MODULE name declared in the config file (e.g., `"stub-A"`), NOT the plugin TYPE (e.g., `"stub"`). Resolution walks `cfg.Modules` to find the matching module, then extracts the plugin type + module config. Helper:
+`--provider` semantic (cycle-4 finding I2): `providerName` is the `iac.provider` MODULE name declared in the config file (e.g., `"stub-A"`), NOT the plugin TYPE (e.g., `"stub"`). Resolution walks `cfg.Modules` to find the matching module, then extracts the plugin type from `modCfg["provider"]` field. Helper mirrors the existing `resolveProviderForSpec` (`workflow/cmd/wfctl/infra.go:1150`):
 
 ```go
-// resolveProviderModuleByName mirrors resolveProviderForSpec's resolution
-// but takes an explicit module name instead of deriving it from a spec.
-// Walks cfg.Modules for m.Type starts-with "iac.provider" AND m.Name == name.
+// resolveProviderModuleByName resolves an iac.provider module by name,
+// returning the plugin discriminator (from modCfg["provider"]) and the
+// fully-resolved module config. Mirrors resolveProviderForSpec but
+// indexes by module name instead of by spec's provider reference.
 func resolveProviderModuleByName(cfgFile, envName, name string) (providerType string, providerCfg map[string]any, err error) {
-    cfg, err := loadConfig(cfgFile, envName)
-    if err != nil { return "", nil, err }
+    cfg, err := config.LoadFromFile(cfgFile) // single arg — verified infra.go:221
+    if err != nil { return "", nil, fmt.Errorf("load config: %w", err) }
     for _, m := range cfg.Modules {
-        if m.Name == name && strings.HasPrefix(m.Type, "iac.provider") {
-            return m.Type, m.Config, nil
+        if m.Name != name || m.Type != "iac.provider" {
+            continue
         }
+        resolved, rerr := m.ResolveForEnv(envName) // env-override handling, matches infra.go:1165
+        if rerr != nil { return "", nil, fmt.Errorf("resolve env %q for module %q: %w", envName, name, rerr) }
+        modCfg, _ := config.ExpandEnvInMapPreservingKeys(resolved.Config, infraPreserveKeys)
+        provType, _ := modCfg["provider"].(string)
+        if provType == "" {
+            return "", nil, fmt.Errorf("module %q missing 'provider' field in config", name)
+        }
+        return provType, modCfg, nil
     }
     return "", nil, fmt.Errorf("no iac.provider module named %q in config", name)
 }
 ```
+
+Two corrections vs. cycle-5 draft:
+1. `loadConfig(cfgFile, envName)` doesn't exist; real function is `config.LoadFromFile(cfgFile)` (single arg). Env-override is per-module via `m.ResolveForEnv(envName)`.
+2. `m.Type` is always exactly `"iac.provider"` (not `"iac.provider.<sub>"`). Plugin discriminator lives in `modCfg["provider"].(string)` — same pattern as `resolveProviderForSpec` at line 1174.
+
+Alternative: delegate to existing `resolveProviderForSpec` by synthesizing a `ResourceSpec{Config: map[string]any{"iac_provider": name}}` — verify the spec-side lookup pattern at implementation time before choosing inline helper vs. delegation.
 
 In `runInfraImportAll`:
 
@@ -1909,8 +1924,11 @@ set -euo pipefail
 PASS=0; FAIL=0; SKIP=0
 # Build stub plugin from shared lib
 go build -o /tmp/dns-stub ../../lib/dns-stub-plugin/
+# Point wfctl plugin discovery at /tmp (env var alternative to --plugin-dir
+# per-subcommand flag — verified at workflow/cmd/wfctl/infra.go:259).
+export WFCTL_PLUGIN_DIR=/tmp
 # wfctl invocation: import-all then plan, assert plan is no-op
-if wfctl --plugin-dir=/tmp infra import-all --config=../config/app.yaml --provider=stub --type=infra.dns; then PASS=$((PASS+1)); else FAIL=$((FAIL+1)); fi
+if wfctl infra import-all --config=../config/app.yaml --provider=stub --type=infra.dns; then PASS=$((PASS+1)); else FAIL=$((FAIL+1)); fi
 if wfctl --plugin-dir=/tmp infra plan --config=../config/app.yaml > /tmp/plan.txt; then PASS=$((PASS+1)); else FAIL=$((FAIL+1)); fi
 if grep -q "No changes" /tmp/plan.txt; then PASS=$((PASS+1)); else FAIL=$((FAIL+1)); fi
 echo "PASS=$PASS FAIL=$FAIL SKIP=$SKIP"
@@ -1950,17 +1968,21 @@ Configure two stub provider instances (stub-A as DO equivalent, stub-B as CF equ
 set -euo pipefail
 PASS=0; FAIL=0; SKIP=0
 
+# Build stub plugin + point wfctl discovery at /tmp
+go build -o /tmp/dns-stub ../../lib/dns-stub-plugin/
+export WFCTL_PLUGIN_DIR=/tmp
+
 # 1. Apply source config → populate stub-A state
-wfctl --plugin-dir=/tmp infra apply --config=../config/source.yaml && PASS=$((PASS+1)) || FAIL=$((FAIL+1))
+wfctl infra apply --config=../config/source.yaml && PASS=$((PASS+1)) || FAIL=$((FAIL+1))
 
 # 2. Import-all from source provider; capture state
-wfctl --plugin-dir=/tmp infra import-all --config=../config/source.yaml --provider=stub-A --type=infra.dns --output=/tmp/source-state.json && PASS=$((PASS+1)) || FAIL=$((FAIL+1))
+wfctl infra import-all --config=../config/source.yaml --provider=stub-A --type=infra.dns --output=/tmp/source-state.json && PASS=$((PASS+1)) || FAIL=$((FAIL+1))
 
 # 3. Apply target config → populate stub-B state (same resource set, different provider module)
-wfctl --plugin-dir=/tmp infra apply --config=../config/target.yaml && PASS=$((PASS+1)) || FAIL=$((FAIL+1))
+wfctl infra apply --config=../config/target.yaml && PASS=$((PASS+1)) || FAIL=$((FAIL+1))
 
 # 4. Import-all from target provider; capture state
-wfctl --plugin-dir=/tmp infra import-all --config=../config/target.yaml --provider=stub-B --type=infra.dns --output=/tmp/roundtrip-state.json && PASS=$((PASS+1)) || FAIL=$((FAIL+1))
+wfctl infra import-all --config=../config/target.yaml --provider=stub-B --type=infra.dns --output=/tmp/roundtrip-state.json && PASS=$((PASS+1)) || FAIL=$((FAIL+1))
 
 # 5. Diff source vs roundtrip with per-(provider, record_type, field) exclusions
 python3 ./verify-transfer.py /tmp/source-state.json /tmp/roundtrip-state.json ../config/lossiness.yaml && PASS=$((PASS+1)) || FAIL=$((FAIL+1))
@@ -2039,11 +2061,16 @@ resources:
 #!/usr/bin/env bash
 set -euo pipefail
 PASS=0; FAIL=0; SKIP=0
+
+# Build stub plugin + point wfctl discovery at /tmp
+go build -o /tmp/dns-stub ../../lib/dns-stub-plugin/
+export WFCTL_PLUGIN_DIR=/tmp
+
 # Single apply: both providers, both zones
-wfctl --plugin-dir=/tmp infra apply --config=../config/app.yaml && PASS=$((PASS+1)) || FAIL=$((FAIL+1))
+wfctl infra apply --config=../config/app.yaml && PASS=$((PASS+1)) || FAIL=$((FAIL+1))
 # Roundtrip: import-all each provider, assert delegation NS at parent + child records intact
-wfctl --plugin-dir=/tmp infra import-all --config=../config/app.yaml --provider=stub-A --type=infra.dns --output=/tmp/parent-state.json && PASS=$((PASS+1)) || FAIL=$((FAIL+1))
-wfctl --plugin-dir=/tmp infra import-all --config=../config/app.yaml --provider=stub-B --type=infra.dns --output=/tmp/child-state.json && PASS=$((PASS+1)) || FAIL=$((FAIL+1))
+wfctl infra import-all --config=../config/app.yaml --provider=stub-A --type=infra.dns --output=/tmp/parent-state.json && PASS=$((PASS+1)) || FAIL=$((FAIL+1))
+wfctl infra import-all --config=../config/app.yaml --provider=stub-B --type=infra.dns --output=/tmp/child-state.json && PASS=$((PASS+1)) || FAIL=$((FAIL+1))
 jq -e '.resources[] | select(.name=="parent-zone") | .applied_config.records[] | select(.type=="NS" and .name=="child.example.test")' /tmp/parent-state.json && PASS=$((PASS+1)) || FAIL=$((FAIL+1))
 jq -e '.resources[] | select(.name=="child-zone") | (.applied_config.records | length) >= 2' /tmp/child-state.json && PASS=$((PASS+1)) || FAIL=$((FAIL+1))
 echo "PASS=$PASS FAIL=$FAIL SKIP=$SKIP"
@@ -2094,6 +2121,7 @@ Design: workflow-plugin-infra/docs/plans/2026-05-26-dns-provider-contract-design
 | Date | Author | Change |
 |---|---|---|
 | 2026-05-26 | codingsloth@pm.me | Initial plan draft (cycle 1). Mirrors design cycle 3.5. 8 PRs, 32 tasks, 6 repos. |
+| 2026-05-26 | codingsloth@pm.me | Plan cycle 6 — addresses adversarial cycle 5 findings (all 3 fact-verified before applying). (C1-CYCLE5) `resolveProviderModuleByName` was returning `m.Type` (always literal `"iac.provider"`) but the caller needs the plugin discriminator from `modCfg["provider"].(string)` — verified by reading `resolveProviderForSpec` at `infra.go:1174`. Helper rewritten to mirror the existing function's resolution pattern including `m.ResolveForEnv(envName)` + `config.ExpandEnvInMapPreservingKeys(...)`. (C2-CYCLE5) `loadConfig(cfgFile, envName)` doesn't exist; corrected to `config.LoadFromFile(cfgFile)` (single arg) — verified `infra.go:221`. (I1-CYCLE5) `--plugin-dir` is per-subcommand flag not global — verified at `infra.go:258-259`. Switched all scenario run.sh scripts to use `export WFCTL_PLUGIN_DIR=/tmp` env var at top (verified env var support same line). Cleaner than per-invocation flag. |
 | 2026-05-26 | codingsloth@pm.me | Plan cycle 5 — addresses adversarial cycle 4 findings (verified facts against actual repos before applying). (C1-CYCLE4) workflow-registry layout: `plugins/<short-name>/manifest.json` (NO `workflow-plugin-` prefix; verified by `ls plugins/`). Cloudflare DOES NOT exist in registry today — Task 13.5 reframed as `plugins/cloudflare/manifest.json` CREATE + 3 existing modifies. `validate-manifests.sh` path is `scripts/validate-manifests.sh` (verified). (C2-CYCLE4) `interfaces.IaCProvider.Import` returns `(*ResourceState, error)` not `(*ResourceOutput, error)` (verified iac_provider.go:30). Task 15 importFn stub + Task 29 stub plugin Import method both corrected. (I1-CYCLE4) Task 32 jq paths corrected: `.applied_config.records` not `.config.records` (ResourceState field tag is `json:"applied_config"` per iac_state.go:37); operator position fixed for length check. (I2-CYCLE4) `--provider` semantic explicitly specified: module name, not plugin type. `resolveProviderModuleByName` helper specified inline (~12 LOC). (M3) `--plugin-dir=/tmp` added to all `wfctl infra apply` + `wfctl infra import-all` invocations in scenario run.sh scripts. |
 | 2026-05-26 | codingsloth@pm.me | Plan cycle 4 — addresses adversarial cycle 3 findings. (C1-CYCLE3) `wfctl infra apply` has NO `--provider` flag — provider derives from config's `iac.provider` module. Task 31 reworked to paired source/target config pattern (no translate script). (I1-CYCLE3) workflow-registry stores manifests at `plugins/<name>/manifest.json`, NOT `manifests/*.yaml`. Task 13.5 paths + format corrected; uses repo's own `validate-manifests.sh` for preflight. (I2-CYCLE3) `sleep 5` dropped; PR number captured atomically from `gh pr create` stdout. (I3-CYCLE3) `translate-state-to-config.py` helper deleted entirely (reviewer Option 2 — paired fixture+config pair eliminates state→config schema gap). (M1) `sed -i ''` BSD-only → `perl -pi -e` for portability across Tasks 19/20/21. (M2) stub plugin Import method now has explicit YAML fixture lookup implementation, not a TODO placeholder. |
 | 2026-05-26 | codingsloth@pm.me | Plan cycle 3 — addresses adversarial cycle 2 findings. (C2-NEW) Task 15 runtime dispatch now asserts `interfaces.EnumeratorAll` not `interfaces.Enumerator` (the original I1 fix was applied to the compile-time assertion only, missed the runtime dispatch). (C3-NEW) CF test stub dropped reference to nonexistent `pagination.NewArrayAutoPagerFromSlice`; instead define minimal `zonePager` interface (`Next() bool / Current() Zone / Err() error`) that both the real AutoPager and a `slicePager` test fake satisfy. (C4-NEW) `wfctl plugin registry-validate` doesn't exist; replaced with explicit Go-test or `wfctl plugin validate <path>` per-manifest fallback. (I1-CYCLE2) Task 31 reworked to use config-driven cross-provider apply path (no `--state-file` flag; added `translate-state-to-config.py` helper). (I2-CYCLE2) `dumpStateToFile` now has explicit implementation block w/ `infraStateStore.ListResources` extension note. |
