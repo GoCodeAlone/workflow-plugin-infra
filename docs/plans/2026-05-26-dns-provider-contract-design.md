@@ -1,6 +1,6 @@
 # DNS import + provider decoupling — phased design
 
-**Status:** Draft (cycle 2 — full architectural pivot after adversarial cycle 1)
+**Status:** Draft (cycle 3 — addresses cycle-2 adversarial findings)
 **Author:** codingsloth@pm.me
 **Date:** 2026-05-26
 **Predecessor:** `docs/plans/2026-05-26-dns-provider-v2-design.md` (v2 in-process libdns adapter pattern)
@@ -37,7 +37,7 @@ Source: `/Users/jon/workspace/docs/design-guidance.md`
 
 | guidance | design response |
 |---|---|
-| wfctl is user-facing CLI; no new bare binaries | Bulk-import helper ships as `wfctl infra import-all` builtin; policy admin commands move to `wfctl dns-policy <subcommand>` builtin |
+| wfctl is user-facing CLI; no new bare binaries | Bulk-import helper ships as `wfctl infra import-all` builtin (subcommand of existing `infra`); policy admin commands move to `wfctl dns-policy <subcommand>` builtin. **Note**: cycle-2 adversarial flagged this as a conflict with the design-guidance §CLI line "CLI surface attaches via plugins, not by editing wfctl." Cycle-3 reconciliation: that guidance line was written for new capability-scoped CLI (each new feature → new plugin). wfctl already hosts cross-cutting orchestrator commands (`infra plan/apply/destroy/import/state/...`) that coordinate multiple peer plugins — dns-policy is the same class of command. Design-guidance is being updated in the same change set as this design to clarify the distinction; see the workspace `docs/design-guidance.md` revision dated cycle-3 commit. The clarification is autonomous-mode authored (per user's prior direction "Update the workspace project guidance with the details you found around contracts and extensibility") and stands as durable knowledge. |
 | Plugin contracts via typed gRPC; no `structpb`/`Any` | Uses existing strict `IaCProvider.Import` + `IaCProviderEnumerator.EnumerateAll`; no new contract |
 | Plugin Contracts & Extensibility — contracts in orchestrator plugin only when peer plugins need them | No new cross-plugin contract; engine-native primitives sufficient. The guidance section added 2026-05-26 stands as durable knowledge for future designs but does not need to be exercised here. |
 | Reuse over rebuild | Reuses existing `wfctl infra import`, `IaCProviderEnumerator`, provider plugins' existing resource drivers |
@@ -60,7 +60,7 @@ Each provider plugin grows `IaCProviderEnumerator.EnumerateAll(ctx, "infra.dns")
 - `workflow-plugin-digitalocean`: `internal/provider.go` `EnumerateAll` switch adds `case "infra.dns"` calling godo `Domains.List` (paginated). Each `*godo.Domain` becomes `*interfaces.ResourceOutput` with `Outputs.zone=<name>`, `Outputs.zone_id=<name>` (DO uses domain name as ID), `Outputs.ttl=<ttl>`.
 - `workflow-plugin-cloudflare`: corresponding `EnumerateAll` impl using `cloudflare-go/v7` `client.Zones().List`. Output includes `Outputs.zone_id=<cf-zone-uuid>`, `Outputs.account_id`.
 - `workflow-plugin-namecheap`: uses `go-namecheap-sdk` `Domains.GetList`. Output includes `Outputs.zone=<name>`, `Outputs.is_using_our_dns` (NC's authority flag).
-- `workflow-plugin-hover`: uses `pkg/hoverclient` (extracted last session) `ListDomains`. Output includes `Outputs.zone=<name>`, `Outputs.expires_at`.
+- `workflow-plugin-hover`: uses `pkg/hoverclient` (extracted PR #26, tag v0.3.0). The package currently exposes per-domain methods (`GetDomain`, `GetDomainDelegation`, `ListRecords`, etc.) but no account-level `ListDomains`. **Phase 1 Hover PR explicitly adds `ListDomains(ctx) ([]Domain, error)` to `pkg/hoverclient/client.go`** calling `GET /api/domains` (the `Domain` type at client.go:257 references this endpoint; the wrapper method is the new work). Output for EnumerateAll: `Outputs.zone=<name>`, `Outputs.expires_at`.
 
 Each ResourceOutput's `ProviderID` is set to the value the provider plugin's `IaCProvider.Import` expects for that zone (matches the contract precedent: DO uses domain name as cloud ID; CF uses zone UUID; etc. — confirm per-provider during implementation).
 
@@ -97,7 +97,7 @@ This is a thin wrapper around existing primitives; no new gRPC, no new contract.
 
 - New package `workflow/dns/policy` (relocated from `workflow-plugin-infra/internal/dnspolicy/`): pure-Go policy parser/serializer. No I/O. Imported by both wfctl commands and the apply-gate hook.
 - New package `workflow/dns/gate` (relocated from `workflow-plugin-infra/internal/dnsgate/`): apply-time policy check. Operates on `ResourceSpec` + provider `Driver.Read` to fetch current TXT records. Registered as a pre-apply hook for resource type `infra.dns` in the `wfctl infra apply` flow.
-- New package `workflow/dns/audit` (relocated from `workflow-plugin-infra/internal/dnsaudit/`): JSONL append. Trail path migrates from `${XDG_STATE_HOME}/wfctl/plugins/infra/dns-audit.jsonl` → `${XDG_STATE_HOME}/wfctl/dns-audit.jsonl` (one-time migration: read old path on first run, append into new path, atomic move).
+- New package `workflow/dns/audit` (relocated from `workflow-plugin-infra/internal/dnsaudit/`): JSONL append. Trail path migrates from `${XDG_STATE_HOME}/wfctl/plugins/infra/dns-audit.jsonl` → `${XDG_STATE_HOME}/wfctl/plugins/wfctl/dns-audit.jsonl` (one-time migration: read old path on first run, append into new path, leave old file in place for one release cycle, follow-up PR removes it). Path follows the design-guidance canonical shape `${XDG_STATE_HOME:-$HOME/.local/state}/wfctl/plugins/<plugin>/<feature>-audit.jsonl` with `wfctl` as the plugin segment because the commands are now wfctl builtins.
 - New wfctl commands (siblings to `wfctl infra`):
   - `wfctl dns-policy show --zone <zone> --provider <name>` (replaces `wfctl infra-dns policy show`)
   - `wfctl dns-policy set --zone <zone> --provider <name> --owner <name> [--delegate ...]` (replaces `wfctl infra-dns set-policy`)
@@ -107,7 +107,8 @@ This is a thin wrapper around existing primitives; no new gRPC, no new contract.
   - Resolves provider via `resolveIaCProvider`.
   - Resolves `ResourceDriver("infra.dns")` from the provider.
   - For policy R/W: calls `driver.Read(zoneRef)` → parses TXT records via `workflow/dns/policy` → mutates → calls `driver.Update(zoneRef, updatedSpec)`. Operates against the EXISTING strict-contract `IaCResourceDriver` surface — no new RPCs.
-- Update `wfctl infra apply` to invoke the gate hook for any `infra.dns` resource action (Create/Update). Gate failure → action aborted before driver call.
+- **Extend `ApplyPlanHooks` with a pre-action gate slot.** Current `ApplyPlanHooks` (`workflow/iac/wfctlhelpers/apply.go:91`) has only `OnResourceApplied`, `OnResourceDeleted`, `OnPlanComplete` — all post-action. Phase 3a explicitly adds `OnBeforeAction func(ctx context.Context, action interfaces.PlanAction) error` to `ApplyPlanHooks`. A non-nil error returned from `OnBeforeAction` aborts the per-action dispatch before the driver call. Callers that construct `ApplyPlanHooks` literals get updated to pass `nil` for the new field (no behavior change) except for the dns-gate wiring which sets it explicitly. Existing test coverage in `apply_test.go` extended with a pre-action-abort case. This is a first-class wfctl change, not an incidental assumption — promoted from cycle-2 A4.
+- Wire the dns-gate as the `OnBeforeAction` implementation for any `infra.dns` resource action (Create/Update). Gate failure → action aborted before driver call.
 
 **Phase 3b — workflow-plugin-infra strip (1 PR, workflow-plugin-infra)**:
 
@@ -132,7 +133,13 @@ github.com/libdns/azure
 github.com/libdns/godaddy   (if present after v2)
 ```
 
-The `infra.dns_record` typed step's handler at `internal/plugin.go:150` (caller-list miss from cycle-1 adversarial) — that handler currently calls `dnsprovider.NewAdapter` to perform per-step DNS record mutation. Migration: rewrite the step handler to dispatch via the engine's `provider.ResourceDriver("infra.dns")` path. The step receives a target provider name + zone; resolves the driver via the engine context (the same way other typed steps resolve providers — pattern lives in `workflow/module/pipeline_step_*.go` for IaC-touching steps). After the rewrite, the step handler holds no libdns/* import.
+The `infra.dns_record` typed step's handler at `internal/plugin.go:149-165` (caller-list confirmed by cycle-2 grep) — that handler currently calls `dnsprovider.ExpandCredsMap` (line 149), `dnsprovider.NewAdapter` (line 150), and `dnsprovider.Apply` (line 165). Migration entails three coupled changes:
+
+1. **Proto contract break for `DNSRecordStepConfig`** (`internal/contracts/infra.proto:158`): drop the `map<string, string> provider_creds = 2;` field; replace with `string provider_ref = 2;` carrying the name of the infra-config-declared provider module (e.g., `"cloudflare"`). The step handler resolves the provider via engine context lookup against this ref, never carrying creds inline. Per user direction ("don't worry about maintaining compatibility, nothing actively uses the DNS functionality currently"), this is a clean field break — no deprecation cycle, no backward-compat shim. workflow-plugin-infra ships a major version bump capturing the contract break.
+2. **Step handler rewrite**: replace `dnsprovider.NewAdapter` with `engine.ResolveProvider(req.Config.ProviderRef)` → `provider.ResourceDriver("infra.dns")`. The pattern lives in `workflow/module/pipeline_step_*.go` for other IaC-touching typed steps; cite the precedent at implementation time.
+3. **`upsert` semantic via composite Read→Create-or-Update**: existing step config supports `operation=upsert` (create-or-update). `IaCResourceDriver` does not have a single primitive for this — `Create` returns error on conflict and `Update` requires existing resource. Composite implementation: handler calls `driver.Read(zoneRef)`; if record matching (type, name) exists in returned state, dispatches `driver.Update(zoneRef, updatedSpec)` with the modified records list; if absent, dispatches the equivalent Create path. Whole-zone-replace semantics dominate at the driver level anyway (NC requires it; CF/DO behave equivalently via libdns wrapper) — the composite is honest about the semantics. Document in handler comments.
+
+After the rewrite, the step handler holds no libdns/* import and no inline creds.
 
 Update `plugin.json`:
 - Remove `cliCommands` entry for `infra-dns` (commands moved to wfctl builtins).
@@ -152,7 +159,22 @@ This PR depends on Phase 3a being merged (the relocated code must exist in wfctl
 
 3. **`dns/delegation/`** — parent zone at DO holds NS records for `child.example.test` pointing to CF nameservers → CF holds `child.example.test` zone with managed A/AAAA records → both managed in same `wfctl infra apply` run → assert dig-resolves correctly (or simulated equivalent for scenario test runner). Tests the "delegation from one provider to another with records managed within" pattern.
 
-Test runner gating: scenarios that require live cloud creds opt in via env (`WORKFLOW_SCENARIO_LIVE_DO=1` etc.). Local scenarios use stubbed provider plugin processes serving canned EnumerateAll/Import responses (workflow-scenarios already has a stub-plugin harness pattern from prior IaC scenario work).
+Test runner gating: scenarios that require live cloud creds opt in via env (`WORKFLOW_SCENARIO_LIVE_DO=1` etc.). Local scenarios use stubbed provider plugin processes serving canned EnumerateAll/Import responses.
+
+**Stub provider gRPC plugin harness — new infrastructure in PR 8 scope.** Cycle-2 adversarial confirmed that workflow-scenarios's existing mocks are HTTP-API mocks (Twilio, LaunchDarkly, etc.), NOT gRPC plugin processes conforming to `iac.proto`. PR 8 explicitly builds a minimal stub IaCProvider plugin at `workflow-scenarios/dns/stub-plugin/`: a small Go binary that uses `sdk.ServeIaCPlugin` and answers `EnumerateAll`/`Import` from a YAML-fixture file. The harness pattern is small (existing workflow internal-tests have similar test plugins under `workflow/plugin/external/sdk/serve_full_test.go` and adjacent test scaffolding — that scaffolding can be cribbed). The stub plugin is the load-bearing piece that makes the import-export-roundtrip and delegation scenarios runnable in CI without live creds.
+
+**Cross-provider transfer lossiness charter** (Phase 4 scenario 2): the scenario asserts equality on `(type, name, data, ttl)` only. Provider-specific extras are KNOWN-lossy and explicitly excluded from assertion. Documented exclusion list per provider, used as field-skip masks by the test runner:
+
+| provider | excluded fields (lossy on transfer) |
+|---|---|
+| cloudflare | `proxied` |
+| namecheap | `email_type`, `is_using_our_dns` |
+| digitalocean | `weight`, `port`, `flags`, `tag` (SRV/CAA extras) |
+| hover | (none currently identified) |
+
+Future record-type extensions to this list happen in the scenario's `lossiness.yaml` config; not blocking design progression. Scenarios surface unexpected-loss failures (a field present at provider A that A's importer drops silently) by importing-then-applying-back-to-A and checking the diff — that is import-export-roundtrip (scenario 1), separate from cross-provider transfer (scenario 2).
+
+**Multi-provider single-config apply** (Phase 4 scenario 3 — delegation): two `infra.dns` resources in one config, each bound to a different `iac.provider.*` module. Pattern precedent: `workflow-scenarios/scenarios/66-iac-multi-cloud/` already demonstrates multi-cloud resources in a single config; the delegation scenario follows the same shape with two DNS-capable providers.
 
 **PR**: 1 (workflow-scenarios), but landed AFTER Phase 1 (needs EnumerateAll across providers).
 
@@ -255,7 +277,7 @@ Same RPC surface (`IaCResourceDriver.Read` + `Update`), already part of the stri
 
 ## Infrastructure Impact
 
-- 7 in-scope PRs across 4 repos (1 workflow, 2 workflow-plugin-infra+the policy relocation has separate phases, 4 provider plugins, 1 workflow-scenarios) + 1 pointer to gocodealone-dns.
+- 8 in-scope PRs across 6 repos (4 provider plugins, 2 workflow PRs for Phase 2 + 3a, 1 workflow-plugin-infra PR for Phase 3b strip, 1 workflow-scenarios PR for Phase 4) + 1 pointer to gocodealone-dns design (Phase 5 deferred).
 - Each provider plugin gets a minor version bump (new capability advertised).
 - workflow gets a minor version bump (new wfctl subcommands + relocated dns/policy/gate/audit packages).
 - workflow-plugin-infra gets a major version bump (capability surface shrinks: cliCommands removed + module/step factories may change; concrete diff at Phase 3b time).
@@ -268,7 +290,7 @@ Same RPC surface (`IaCResourceDriver.Read` + `Update`), already part of the stri
 - PR 1-4 (provider EnumerateAll): per-PR revert. Each provider's EnumerateAll is additive; revert removes the capability advertisement and the impl. No downstream caller is broken because Phase 2's `import-all` will simply report "EnumerateAll not supported by provider" for any reverted provider.
 - PR 5 (wfctl import-all): revert removes the subcommand. `wfctl infra import` continues to work for per-zone import.
 - PR 6 (wfctl dns-policy + dns packages): revert removes the new commands + apply-time gate hook + relocated packages. workflow-plugin-infra's existing admincli + dnspolicy/gate/audit code is still in place (PR 7 hasn't run yet) — system reverts to the prior state cleanly.
-- PR 7 (workflow-plugin-infra strip): revert restores libdns deps + admincli + dnspolicy/gate/audit. Coupled with reverting PR 6, the system returns to pre-refactor behavior. Order matters: PR 7 must be reverted BEFORE PR 6 if both are being rolled back (else workflow-plugin-infra has policy code that doesn't compile against missing imports).
+- PR 7 (workflow-plugin-infra strip): revert restores libdns deps + admincli + dnspolicy/gate/audit. Coupled with reverting PR 6, the system returns to pre-refactor behavior. **Revert order: PR 7 first (restores policy packages into workflow-plugin-infra), THEN PR 6 (removes the duplicate packages from workflow).** If PR 6 is reverted first while PR 7 is still merged, wfctl loses the dns-policy commands but workflow-plugin-infra has already stripped its own implementations → system has no working dns-policy surface at all. PR-7-first ensures workflow-plugin-infra is functional at every revert step.
 - PR 8 (scenarios): revert removes scenarios. No runtime impact.
 
 ## Assumptions
@@ -276,7 +298,7 @@ Same RPC surface (`IaCResourceDriver.Read` + `Update`), already part of the stri
 - A1: `IaCProviderEnumerator.EnumerateAll` is the right enumeration RPC for DNS zones (verified: `iac.proto:64-67`; existing DO EnumerateAll path proves the pattern works for "infra" resource types).
 - A2: `IaCProvider.Import(ctx, cloudID, resourceType)` returns enough state to round-trip through `IaCResourceDriver.Read` for `infra.dns` (verified: CF + NC + DO all already implement Import for infra.dns).
 - A3: wfctl can register new builtin commands (`wfctl dns-policy *`, `wfctl infra import-all`) without conflict with the reserved-command list. `dns-policy` and `import-all` are not in `reservedCLICommands` map (`workflow/cmd/wfctl/plugin_cli_commands.go:14-43`) — `import-all` is a subcommand of `infra`, not a top-level, so it does not even need to clear that map.
-- A4: `wfctl infra apply` has a hook point for pre-action gates per resource type. Needs verification at Phase 3a implementation start; if not present, Phase 3a grows a minimal hook-registry contribution. The pattern is small.
+- A4: ~~`wfctl infra apply` has a hook point for pre-action gates per resource type. Needs verification at Phase 3a implementation start.~~ **Promoted from assumption to explicit Phase 3a work (cycle 3).** Cycle-2 adversarial confirmed `ApplyPlanHooks` (`workflow/iac/wfctlhelpers/apply.go:91`) has only post-action hooks. Phase 3a adds `OnBeforeAction func(ctx, action) error` to `ApplyPlanHooks` as a first-class structural change. Captured in Phase 3a §Components.
 - A5: workflow-scenarios test runner can drive `wfctl infra import-all` end-to-end against a stub provider plugin (matches existing IaC scenario harness pattern).
 - A6: The provider plugins' `IaCProvider.Import` is implemented for `infra.dns` in such a way that the returned `ResourceState.AppliedConfig.records` matches the shape a subsequent `IaCResourceDriver.Read` would produce. If lossy, Phase 4's import-export-roundtrip scenario will fail — that failure is informative, not blocking the design (it surfaces a bug in the provider's Import impl).
 
@@ -309,4 +331,5 @@ Same RPC surface (`IaCResourceDriver.Read` + `Update`), already part of the stri
 | Date | Author | Change |
 |---|---|---|
 | 2026-05-26 | codingsloth@pm.me | cycle 1 — peer-contract architecture (DNSProvider gRPC service in workflow-plugin-infra w/ peer-dispatch via EngineCallbackService). Adversarial review FAIL: 3 Criticals (peer-dispatch RPC absent; missed caller in `infra.dns_record` step handler; reserved-command name collision). |
-| 2026-05-26 | codingsloth@pm.me | cycle 2 — full architectural pivot. Drops new contract entirely. Uses engine-native `wfctl infra import` + `IaCProviderEnumerator.EnumerateAll` strict-contract path. Restructures as 5 phases: (1) EnumerateAll across 4 providers, (2) wfctl import-all wrapper, (3) policy code relocated workflow-plugin-infra → wfctl, (4) workflow-scenarios DNS orchestration, (5) pointer to separate gocodealone-dns design. |
+| 2026-05-26 | codingsloth@pm.me | cycle 2 — full architectural pivot. Drops new contract entirely. Uses engine-native `wfctl infra import` + `IaCProviderEnumerator.EnumerateAll` strict-contract path. Restructures as 5 phases: (1) EnumerateAll across 4 providers, (2) wfctl import-all wrapper, (3) policy code relocated workflow-plugin-infra → wfctl, (4) workflow-scenarios DNS orchestration, (5) pointer to separate gocodealone-dns design. Adversarial FAIL: 3 Criticals (Hover ListDomains missing, ApplyPlanHooks lacks pre-action slot, `DNSRecordStepConfig.provider_creds` stranded + `upsert` semantic mismatch). |
+| 2026-05-26 | codingsloth@pm.me | cycle 3 — targeted fixes for cycle-2 findings. (C1) Phase 1 Hover PR explicitly adds `ListDomains` method to `pkg/hoverclient`. (C2) Phase 3a explicitly adds `OnBeforeAction` to `ApplyPlanHooks`; promotes A4 from assumption to design decision. (C3) Phase 3b breaks `DNSRecordStepConfig.provider_creds` proto contract; replaces with `provider_ref`; documents composite Read→Create-or-Update upsert. (I1) Phase 4 PR 8 scope explicitly includes building stub IaCProvider gRPC plugin harness; lossiness charter listing excluded fields per provider. (I2) design-guidance §CLI clarified in same change set: cross-cutting orchestration → wfctl builtin; capability-scoped → plugin cliCommands. (I4) rollback rationale order fixed. (M1) audit path normalized to `${XDG_STATE_HOME}/wfctl/plugins/wfctl/dns-audit.jsonl`. (M2) PR count corrected to 8. (M3) cite scenario 66 precedent for delegation multi-provider apply. |
