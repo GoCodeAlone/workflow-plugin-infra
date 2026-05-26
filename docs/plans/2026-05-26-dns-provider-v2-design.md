@@ -1,6 +1,14 @@
 # DNS provider v2 — multi-provider adapter expansion
 
-**Status:** Draft (cycle 3 — adversarial cycle 2 findings applied)
+**Status:** Backport 2026-05-26 — registry-map refactor (plan-cycle-1 C-2 fix)
+
+## Backport 2026-05-26 — registry-map dispatch
+
+Plan-cycle-1 adversarial review surfaced that all 6 PRs would touch `adapter.go` switch + `go.mod` simultaneously, violating "parallelizable" claim. Design backported: `NewAdapter` switch refactored to `init()`-based registry-map (`Register("<key>", factory)`). Each provider file self-registers; `NewAdapter` consults map; supported-list computed dynamically from sorted keys. Scope Manifest unchanged (6 PRs, 6 tasks). PR 1 now also covers the registry refactor + re-registers v1 DO+CF. PRs 2-6 add one file with `init()` each — zero adapter.go conflicts. See plan §"Task 1" for the refactor + §"Shared implementation patterns" for the registration shape.
+
+---
+
+**Status (post-backport):** Draft (cycle 3 — adversarial cycle 2 findings applied)
 **Author:** codingsloth@pm.me
 **Date:** 2026-05-26
 **Predecessor:** docs/plans/2026-05-25-dns-ownership-policy-design.md (v1: DO + Cloudflare)
