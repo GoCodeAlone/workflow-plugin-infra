@@ -154,25 +154,9 @@ message CertificateConfig {
   google.protobuf.Struct settings = 7;
 }
 
-// Static per-step config (resolved once at module construction).
-message DNSRecordStepConfig {
-  string provider               = 1;
-  map<string, string> provider_creds = 2;
-  string zone                   = 3;
-}
-
-message DNSRecordStepInput {
-  string name        = 1;
-  string record_type = 2;
-  string data        = 3;
-  int32  ttl         = 4;
-  int32  priority    = 5;
-  string owner       = 6;
-  string operation   = 7;
-}
-
-message DNSRecordStepOutput {
-  string status        = 1;
-  string record_id     = 2;
-  string denial_reason = 3;
-}
+// DNSRecordStepConfig / DNSRecordStepInput / DNSRecordStepOutput removed
+// in v1.0.0 (Phase 3b). The infra.dns_record step type was deleted because
+// peer-dispatch from a step-handler context is architecturally unsupported
+// (cycle 3.5 I-NEW-1). Per-record DNS workflows route through
+// `wfctl infra apply` (config-declared records) or `wfctl dns-policy *`
+// (policy edits) against any provider-plugin that implements infra.dns.

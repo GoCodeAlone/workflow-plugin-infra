@@ -1,6 +1,6 @@
 {
     "name": "workflow-plugin-infra",
-    "version": "0.0.0",
+    "version": "1.0.0",
     "description": "Abstract infra.* module types (13 types) with IaCProvider delegation",
     "author": "GoCodeAlone",
     "license": "MIT",
@@ -59,8 +59,8 @@
             "infra.storage",
             "infra.certificate"
         ],
-        "stepTypes": ["infra.dns_record"],
-        "cliCommands": [{ "name": "infra-dns", "description": "DNS ownership policy admin (set-policy, drift, transfer-ownership, policy show)" }],
+        "stepTypes": [],
+        "cliCommands": [],
         "triggerTypes": []
     }
 }
