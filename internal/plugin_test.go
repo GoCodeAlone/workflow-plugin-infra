@@ -1,12 +1,10 @@
 package internal
 
 import (
-	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"testing"
 
 	"github.com/GoCodeAlone/workflow-plugin-infra/internal/contracts"
@@ -155,91 +153,40 @@ func TestTypedContainerServiceConfigMapsToLegacyModule(t *testing.T) {
 	}
 }
 
-func TestPlugin_StepTypes_Includes_DnsRecord(t *testing.T) {
+// TestPlugin_StepTypes_EmptyPostPhase3b pins the Phase 3b decision:
+// workflow-plugin-infra no longer registers any step types. The legacy
+// infra.dns_record step was removed (peer-dispatch from a step-handler
+// context is architecturally unsupported — cycle 3.5 I-NEW-1). Replaced
+// the v1 tests that asserted infra.dns_record was present.
+func TestPlugin_StepTypes_EmptyPostPhase3b(t *testing.T) {
 	p := NewInfraPlugin()
 	sp, ok := p.(sdk.StepProvider)
 	if !ok {
 		t.Fatal("expected StepProvider")
 	}
-	found := false
-	for _, st := range sp.StepTypes() {
-		if st == "infra.dns_record" {
-			found = true
-			break
-		}
+	if got := sp.StepTypes(); len(got) != 0 {
+		t.Errorf("StepTypes() = %v; want empty post-Phase-3b", got)
 	}
-	if !found {
-		t.Errorf("infra.dns_record not in StepTypes(): %v", sp.StepTypes())
-	}
-}
-
-func TestPlugin_TypedStepTypes_Includes_DnsRecord(t *testing.T) {
-	p := NewInfraPlugin()
 	tsp, ok := p.(sdk.TypedStepProvider)
 	if !ok {
 		t.Fatal("expected TypedStepProvider")
 	}
-	found := false
-	for _, st := range tsp.TypedStepTypes() {
-		if st == "infra.dns_record" {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Errorf("infra.dns_record not in TypedStepTypes(): %v", tsp.TypedStepTypes())
+	if got := tsp.TypedStepTypes(); len(got) != 0 {
+		t.Errorf("TypedStepTypes() = %v; want empty post-Phase-3b", got)
 	}
 }
 
-func TestInfraDnsModule_DeprecatedStartReturnsError(t *testing.T) {
-	p := NewInfraPlugin()
-	mp, ok := p.(sdk.ModuleProvider)
-	if !ok {
-		t.Fatal("expected ModuleProvider")
-	}
-	m, err := mp.CreateModule("infra.dns", "test", map[string]any{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	err = m.Start(context.Background())
-	if err == nil {
-		t.Errorf("expected deprecation error from infra.dns Start()")
-	}
-	if !strings.Contains(err.Error(), "deprecated") {
-		t.Errorf("expected 'deprecated' in err, got %v", err)
-	}
-}
-
-func TestContractDeclaresStrictStepContracts(t *testing.T) {
+// TestContractRegistry_HasNoStepContractsPostPhase3b mirrors the
+// StepTypes assertion at the ContractRegistry level. The Phase 3b strip
+// removed the infra.dns_record proto contract; ContractRegistry should
+// now carry only module contracts.
+func TestContractRegistry_HasNoStepContractsPostPhase3b(t *testing.T) {
 	provider := NewInfraPlugin().(sdk.ContractProvider)
 	registry := provider.ContractRegistry()
-
-	var stepContracts []*pb.ContractDescriptor
 	for _, c := range registry.Contracts {
 		if c.Kind == pb.ContractKind_CONTRACT_KIND_STEP {
-			stepContracts = append(stepContracts, c)
+			t.Errorf("ContractRegistry has unexpected step contract post-Phase-3b: %+v", c)
 		}
-	}
-	found := false
-	for _, c := range stepContracts {
-		if c.StepType == "infra.dns_record" {
-			found = true
-			if c.Mode != pb.ContractMode_CONTRACT_MODE_STRICT_PROTO {
-				t.Errorf("infra.dns_record step contract mode = %s, want strict proto", c.Mode)
-			}
-			if c.ConfigMessage == "" {
-				t.Errorf("infra.dns_record step contract missing ConfigMessage")
-			}
-			if c.InputMessage == "" {
-				t.Errorf("infra.dns_record step contract missing InputMessage")
-			}
-			if c.OutputMessage == "" {
-				t.Errorf("infra.dns_record step contract missing OutputMessage")
-			}
-		}
-	}
-	if !found {
-		t.Errorf("infra.dns_record step contract not found in ContractRegistry")
 	}
 }
 
