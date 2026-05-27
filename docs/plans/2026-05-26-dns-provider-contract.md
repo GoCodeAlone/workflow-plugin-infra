@@ -50,7 +50,7 @@
 - PR 8 needs PR 7 merged (relocates pkg destinations must exist first).
 - PR 9 needs PRs 1-5 merged (scenarios consume import-all + EnumerateAll). PR 9's stub-plugin scaffolding can begin in parallel with PR 7/7; full scenario suite blocks until PR 8 merge to confirm system shape.
 
-**Status:** Draft
+**Status:** Locked 2026-05-26T19:30:00Z
 
 ---
 
