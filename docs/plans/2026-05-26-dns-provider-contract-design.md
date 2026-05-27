@@ -213,13 +213,14 @@ Phase 5 design happens AFTER Phases 1-4 are merged (it consumes their primitives
 | 2 | workflow-plugin-cloudflare | 1 | EnumerateAll("infra.dns") | — |
 | 3 | workflow-plugin-namecheap | 1 | EnumerateAll("infra.dns") | — |
 | 4 | workflow-plugin-hover | 1 | EnumerateAll("infra.dns") | — |
-| 5 | workflow | 2 | `wfctl infra import-all` | PRs 1+2+3+4 (for cross-provider parity smoke) — can land before, but its e2e proof needs at least one provider's PR landed |
-| 6 | workflow | 3a | dns/policy + dns/gate + dns/audit packages + wfctl dns-policy commands + apply-time gate hook + migrate `infra.dns_record` step handler to engine driver path | PRs 1+2+3+4 (step handler migration verified against new EnumerateAll path) |
-| 7 | workflow-plugin-infra | 3b | strip libdns + admincli + dnspolicy/gate/audit + cliCommands removal | PR 6 |
-| 8 | workflow-scenarios | 4 | dns/import-export-roundtrip, dns/cross-provider-transfer, dns/delegation | PRs 1+2+3+4+5 (needs import-all primitive) |
+| 5 | workflow-registry | 1 (followup) | pin-bump manifests for DO/CF/NC/Hover after provider PRs land (incl. `plugins/cloudflare/manifest.json` CREATE — cloudflare has no existing registry entry) | PRs 1+2+3+4 merged + tagged |
+| 6 | workflow | 2 | `wfctl infra import-all` | PRs 1+2+3+4 (for cross-provider parity smoke) + PR 5 manifest refresh |
+| 7 | workflow | 3a | dns/policy + dns/gate + dns/audit packages + wfctl dns-policy commands + apply-time gate hook + remove `infra.dns_record` step migration path (step is removed in PR 8) | PRs 1+2+3+4+6 |
+| 8 | workflow-plugin-infra | 3b | strip libdns + admincli + dnspolicy/gate/audit + cliCommands removal + remove `infra.dns_record` step type | PR 7 |
+| 9 | workflow-scenarios | 4 | dns/import-export-roundtrip, dns/cross-provider-transfer, dns/delegation + stub IaCProvider gRPC plugin | PRs 1+2+3+4+6 (needs import-all primitive) |
 | (deferred) | gocodealone-dns | 5 | separate design + plan; not in this plan | PRs 5+8 |
 
-8 PRs total. PRs 1-4 parallel. PR 5 can land in parallel with 1-4 but its e2e proof needs ≥1 provider PR. PR 6 sequenced after 1-4. PR 7 sequenced after 6. PR 8 sequenced after 5.
+9 PRs total. PRs 1-4 parallel. PR 5 (workflow-registry manifest sweep) follows 1-4 + tags. PR 6 (wfctl import-all) needs 1-4 + 5. PR 7 (wfctl dns-policy + relocations) needs 1-4 + 6. PR 8 (workflow-plugin-infra strip) needs 7. PR 9 (workflow-scenarios) needs 1-4 + 6.
 
 ## Data flow (bulk import path, Phase 1+2)
 
@@ -291,7 +292,7 @@ Same RPC surface (`IaCResourceDriver.Read` + `Update`), already part of the stri
 
 ## Infrastructure Impact
 
-- 8 in-scope PRs across 6 repos (4 provider plugins, 2 workflow PRs for Phase 2 + 3a, 1 workflow-plugin-infra PR for Phase 3b strip, 1 workflow-scenarios PR for Phase 4) + 1 pointer to gocodealone-dns design (Phase 5 deferred).
+- 9 in-scope PRs across 7 repos (4 provider plugins, 1 workflow-registry manifest sweep PR, 2 workflow PRs for Phase 2 + 3a, 1 workflow-plugin-infra PR for Phase 3b strip, 1 workflow-scenarios PR for Phase 4) + 1 pointer to gocodealone-dns design (Phase 5 deferred).
 - Each provider plugin gets a minor version bump (new capability advertised).
 - workflow gets a minor version bump (new wfctl subcommands + relocated dns/policy/gate/audit packages).
 - workflow-plugin-infra gets a major version bump (capability surface shrinks: cliCommands removed + module/step factories may change; concrete diff at Phase 3b time).

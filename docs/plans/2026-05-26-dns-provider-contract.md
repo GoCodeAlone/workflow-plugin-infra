@@ -182,6 +182,7 @@ func (p *DOProvider) enumerateAllDNS(ctx context.Context) ([]*interfaces.Resourc
         for _, d := range domains {
             outputs := map[string]any{
                 "zone":      d.Name,
+                "zone_id":   d.Name,   // DO uses domain name as cloud ID; design §Phase 1 contract
                 "ttl":       d.TTL,
                 "zone_file": d.ZoneFile,
             }
@@ -270,17 +271,31 @@ git commit -m "test(provider): add env-gated live EnumerateAll infra.dns test"
 git push -u origin feat/dns-enumerate-all-2026-05-26T1900
 ```
 
-**Step 4: Open PR**
+**Step 4: Verify capability advertisement (if not auto-detected)**
+
+Each provider plugin advertises optional services via `ContractRegistry`. If the SDK auto-detects `EnumerateAll` implementation via type-assert (per `iac.proto` §ContractRegistry), no plugin.json change is needed. Otherwise, add `IaCProviderEnumerator` to the plugin's declared optional services. Verify at impl time:
+
+```bash
+GOWORK=off go build -o /tmp/wpi ./cmd/workflow-plugin-digitalocean
+wfctl plugin verify-capabilities /tmp/wpi
+# Expect: IaCProviderEnumerator listed as supported service
+```
+
+If output omits `IaCProviderEnumerator`, update `internal/iacserver.go` registration (mirror existing optional service registration pattern such as `IaCProviderDriftDetector`).
+
+**Step 5: Open PR**
 
 ```bash
 gh pr create --title "feat(provider): EnumerateAll for infra.dns" \
-  --body "Implements IaCProviderEnumerator.EnumerateAll(\"infra.dns\") via godo Domains.List paginated. Returns one *ResourceOutput per zone with ProviderID=zone-name + Outputs={zone, ttl, zone_file}.
+  --body "Implements IaCProviderEnumerator.EnumerateAll(\"infra.dns\") via godo Domains.List paginated. Returns one *ResourceOutput per zone with ProviderID=zone-name + Outputs={zone, zone_id, ttl, zone_file}.
 
 Part of cross-repo cascade docs/plans/2026-05-26-dns-provider-contract.md (workflow-plugin-infra). Unblocks wfctl infra import-all path for DO zones.
 
 Live integration test env-gated on INFRA_DNS_ENUMERATE_LIVE=1." \
   --base main
 ```
+
+Apply the same capability-advertisement verification step (Step 4 above) to Tasks 6, 9, 13 (CF, NC, Hover) per-provider PRs.
 
 Add Copilot reviewer per memory feedback (skip per memory `feedback_copilot_review_broken_2026_05.md` if service still broken; CI green + admin-merge suffices).
 
@@ -1066,7 +1081,14 @@ func runInfraImportAllWithDeps(ctx context.Context, provider interfaces.IaCProvi
         zoneName, _ := o.Outputs["zone"].(string)
         if zoneName == "" { zoneName = o.ProviderID }
         if dryRun {
-            fmt.Printf("would import: provider=%s zone=%s id=%s\n", "<provider>", zoneName, o.ProviderID)
+            // Probe each zone for accessibility (auth + provider reachability)
+            // so --dry-run surfaces failures without persisting state.
+            // Design §Phase 2: "non-zero exit if any zone import fails".
+            if _, perr := provider.Import(ctx, o.ProviderID, resourceType); perr != nil {
+                failures = append(failures, fmt.Sprintf("%s: dry-run probe failed: %v", zoneName, perr))
+                continue
+            }
+            fmt.Printf("would import: zone=%s id=%s\n", zoneName, o.ProviderID)
             imported++
             continue
         }
