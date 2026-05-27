@@ -36,19 +36,19 @@
 | 2 | feat(cf): EnumerateAll for infra.dns | Task 4, Task 5, Task 6 | `feat/dns-enumerate-all` (workflow-plugin-cloudflare) |
 | 3 | feat(nc): EnumerateAll for infra.dns | Task 7, Task 8, Task 9 | `feat/dns-enumerate-all` (workflow-plugin-namecheap) |
 | 4 | feat(hover): ListDomains + EnumerateAll for infra.dns | Task 10, Task 11, Task 12, Task 13 | `feat/dns-enumerate-all` (workflow-plugin-hover) |
-| 4.5 | chore(registry): pin-bump DO/CF/NC/Hover for EnumerateAll | Task 13.5 | `chore/dns-providers-pin-bump` (workflow-registry) |
-| 5 | feat(wfctl): infra import-all bulk wrapper | Task 14, Task 15, Task 16, Task 17 | `feat/wfctl-infra-import-all` (workflow) |
-| 6 | feat(wfctl): relocate dns policy/gate/audit + dns-policy commands + OnBeforeAction hook | Task 18, Task 19, Task 20, Task 21, Task 22, Task 23, Task 24 | `feat/wfctl-dns-policy` (workflow) |
-| 7 | refactor(infra): strip libdns + admincli + dns packages + remove dns_record step | Task 25, Task 26, Task 27, Task 28 | `refactor/strip-dns-libdns` (workflow-plugin-infra) |
-| 8 | feat(scenarios): DNS orchestration tests + stub provider plugin harness | Task 29, Task 30, Task 31, Task 32 | `feat/dns-orchestration` (workflow-scenarios) |
+| 5 | chore(registry): pin-bump DO/CF/NC/Hover for EnumerateAll | Task 14 | `chore/dns-providers-pin-bump` (workflow-registry) |
+| 6 | feat(wfctl): infra import-all bulk wrapper | Task 15, Task 16, Task 17, Task 18 | `feat/wfctl-infra-import-all` (workflow) |
+| 7 | feat(wfctl): relocate dns policy/gate/audit + dns-policy commands + OnBeforeAction hook | Task 19, Task 20, Task 21, Task 22, Task 23, Task 24, Task 25 | `feat/wfctl-dns-policy` (workflow) |
+| 8 | refactor(infra): strip libdns + admincli + dns packages + remove dns_record step | Task 26, Task 27, Task 28, Task 29 | `refactor/strip-dns-libdns` (workflow-plugin-infra) |
+| 9 | feat(scenarios): DNS orchestration tests + stub provider plugin harness | Task 30, Task 31, Task 32, Task 33 | `feat/dns-orchestration` (workflow-scenarios) |
 
 **Dependencies:**
 - PRs 1, 2, 3, 4 parallel (no inter-dep).
-- PR 4.5 (workflow-registry manifest sweep) follows PRs 1-4 — batched manifest version pin updates for all 4 providers in one workflow-registry PR per `feedback_version_bump_immediate_merge.md` pattern.
-- PR 5 needs PRs 1-4 merged + tagged + PR 4.5 merged (for its e2e smoke against a real provider). Recommend after all 4 land + tags pushed + registry refreshed.
-- PR 6 needs PRs 1-4 merged + PR 5 merged (its tests exercise EnumerateAll-backed driver paths via `wfctl infra import-all`).
-- PR 7 needs PR 6 merged (relocates pkg destinations must exist first).
-- PR 8 needs PRs 1-5 merged (scenarios consume import-all + EnumerateAll). PR 8's stub-plugin scaffolding can begin in parallel with PR 6/7; full scenario suite blocks until PR 7 merge to confirm system shape.
+- PR 5 (workflow-registry manifest sweep) follows PRs 1-4 — batched manifest version pin updates for all 4 providers in one workflow-registry PR per `feedback_version_bump_immediate_merge.md` pattern.
+- PR 6 needs PRs 1-4 merged + tagged + PR 5 merged (for its e2e smoke against a real provider). Recommend after all 4 land + tags pushed + registry refreshed.
+- PR 7 needs PRs 1-4 merged + PR 6 merged (its tests exercise EnumerateAll-backed driver paths via `wfctl infra import-all`).
+- PR 8 needs PR 7 merged (relocates pkg destinations must exist first).
+- PR 9 needs PRs 1-5 merged (scenarios consume import-all + EnumerateAll). PR 9's stub-plugin scaffolding can begin in parallel with PR 7/7; full scenario suite blocks until PR 8 merge to confirm system shape.
 
 **Status:** Draft
 
@@ -58,16 +58,16 @@
 
 | Guidance | Plan response |
 |---|---|
-| wfctl is user-facing CLI; cross-cutting orchestrators → wfctl builtin | PR 5 + PR 6 add wfctl builtins; PR 7 strips plugin cliCommand |
+| wfctl is user-facing CLI; cross-cutting orchestrators → wfctl builtin | PR 6 + PR 7 add wfctl builtins; PR 8 strips plugin cliCommand |
 | Strict contracts; no structpb/Any | Reuses existing `IaCProviderEnumerator.EnumerateAll` + `IaCProvider.Import` strict contracts |
-| libdns/cloud-sdks isolated in `internal/<provider>/` | PR 7 drops libdns from workflow-plugin-infra; remaining libdns lives in each provider plugin's `internal/drivers/` |
+| libdns/cloud-sdks isolated in `internal/<provider>/` | PR 8 drops libdns from workflow-plugin-infra; remaining libdns lives in each provider plugin's `internal/drivers/` |
 | Cross-driver parity (≥2 drivers) | 4 drivers in PR 1-4; Phase 4 scenarios validate parity |
-| No mock-first development | PR 8 builds real stub IaCProvider gRPC plugin (not HTTP mock) + live-cred env-gated tests in PR 1-4 |
-| Secrets never logged | PR 6 drops `--token` flag from admincli; creds source from infra config file (one location) |
-| Audit trail for state-mutating ops | PR 6 relocates JSONL trail to `${XDG_STATE_HOME}/wfctl/plugins/wfctl/dns-audit.jsonl` |
+| No mock-first development | PR 9 builds real stub IaCProvider gRPC plugin (not HTTP mock) + live-cred env-gated tests in PR 1-4 |
+| Secrets never logged | PR 7 drops `--token` flag from admincli; creds source from infra config file (one location) |
+| Audit trail for state-mutating ops | PR 7 relocates JSONL trail to `${XDG_STATE_HOME}/wfctl/plugins/wfctl/dns-audit.jsonl` |
 | Self-hosted runner for IaC CI | PR 1-4 live tests env-gated; CI workflow uses self-hosted runner already |
-| Plugin minEngineVersion + capabilities populated | PR 7 bumps workflow-plugin-infra to v1.0.0 (capability surface shrink) |
-| Cross-cutting orchestrator commands → wfctl builtin | PR 6 `wfctl dns-policy *` builtin; explicitly justified by rev-3 design-guidance §CLI |
+| Plugin minEngineVersion + capabilities populated | PR 8 bumps workflow-plugin-infra to v1.0.0 (capability surface shrink) |
+| Cross-cutting orchestrator commands → wfctl builtin | PR 7 `wfctl dns-policy *` builtin; explicitly justified by rev-3 design-guidance §CLI |
 
 ---
 
@@ -81,7 +81,7 @@
 | Tasks 25-28 (infra strip) | Plugin/extension + proto break + version pin update | `go build ./...` exits 0 post-strip; version-skew audit clean; `wfctl plugin verify-capabilities workflow-plugin-infra` passes |
 | Tasks 29-32 (scenarios) | Multi-component boundary + integration | scenarios run with stub plugin; cross-provider transfer asserts (type,name,data,ttl) equality; delegation scenario walks two providers |
 
-Runtime-launch-validation triggers (build/deployment/version pins/plugin loading) apply to: Task 28 (workflow-plugin-infra major bump + capability change); Task 24 (wfctl version bump). Both carry rollback notes in their task bodies.
+Runtime-launch-validation triggers (build/deployment/version pins/plugin loading) apply to: Task 29 (workflow-plugin-infra major bump + capability change); Task 25 (wfctl version bump). Both carry rollback notes in their task bodies.
 
 ---
 
@@ -872,14 +872,14 @@ gh pr create --title "feat(provider): ListDomains + EnumerateAll for infra.dns" 
 
 ---
 
-## PR 4.5 — workflow-registry: pin-bump manifests for DO/CF/NC/Hover
+## PR 5 — workflow-registry: pin-bump manifests for DO/CF/NC/Hover
 
 **Repo:** `/Users/jon/workspace/workflow-registry`
 **Branch:** `chore/dns-providers-pin-bump-2026-05-26T1900`
 
 **Wait for:** PRs 1, 2, 3, 4 merged + tags published in respective repos.
 
-### Task 13.5: Pin-bump 4 provider manifests + admin-merge
+### Task 14: Pin-bump 4 provider manifests + admin-merge
 
 Per `feedback_version_bump_immediate_merge.md`: version-pin manifest changes auto-merge in same turn. Batch all 4 provider bumps into one PR.
 
@@ -927,14 +927,14 @@ PR number captured from `gh pr create` stdout (URL ends with `/pull/<NUM>`); avo
 
 ---
 
-## PR 5 — workflow: wfctl infra import-all bulk wrapper
+## PR 6 — workflow: wfctl infra import-all bulk wrapper
 
 **Repo:** `/Users/jon/workspace/workflow`
 **Branch:** `feat/wfctl-infra-import-all-2026-05-26T1900`
 
 **Wait for**: PRs 1-4 merged + tagged + workflow-registry manifests refreshed.
 
-### Task 14: Add command dispatch + flag parsing
+### Task 15: Add command dispatch + flag parsing
 
 **Files:**
 - Modify: `cmd/wfctl/infra.go` (add `case "import-all"` to `runInfra` switch + new `runInfraImportAll` function)
@@ -993,7 +993,7 @@ func runInfraImportAll(args []string) error {
     if err := fs.Parse(args); err != nil { return err }
     if providerName == "" { return fmt.Errorf("import-all requires --provider") }
     if resourceType == "" { return fmt.Errorf("import-all requires --type (e.g. infra.dns)") }
-    // TODO: dispatch via runInfraImportAllWithDeps (Task 15)
+    // TODO: dispatch via runInfraImportAllWithDeps (Task 16)
     return nil
 }
 ```
@@ -1018,7 +1018,7 @@ git add cmd/wfctl/infra.go cmd/wfctl/infra_import_all_test.go
 git commit -m "feat(wfctl): add infra import-all subcommand scaffold + flag parsing"
 ```
 
-### Task 15: Implement enumerate + iterate dispatch
+### Task 16: Implement enumerate + iterate dispatch
 
 **Files:**
 - Modify: `cmd/wfctl/infra.go` (runInfraImportAll body)
@@ -1159,7 +1159,7 @@ fmt.Printf("imported %d zones\n", n)
 return err
 ```
 
-`dumpStateToFile` is a new helper (implementation below). The variable name is `configFile` (matches Task 14's flag binding), not `cfgFile`.
+`dumpStateToFile` is a new helper (implementation below). The variable name is `configFile` (matches Task 15's flag binding), not `cfgFile`.
 
 ```go
 // dumpStateToFile snapshots the current state-store contents to outputPath
@@ -1185,7 +1185,7 @@ git add cmd/wfctl/infra.go cmd/wfctl/infra_import_all_test.go
 git commit -m "feat(wfctl): implement infra import-all dispatch via EnumerateAll + Import"
 ```
 
-### Task 16: End-to-end smoke test against real plugin
+### Task 17: End-to-end smoke test against real plugin
 
 **Files:**
 - Test: `cmd/wfctl/infra_import_all_e2e_test.go` (new)
@@ -1215,7 +1215,7 @@ git add cmd/wfctl/infra_import_all_e2e_test.go
 git commit -m "test(wfctl): env-gated e2e for infra import-all against real plugin"
 ```
 
-### Task 17: Open PR
+### Task 18: Open PR
 
 ```bash
 git push -u origin feat/wfctl-infra-import-all-2026-05-26T1900
@@ -1230,14 +1230,14 @@ Part of cross-repo cascade docs/plans/2026-05-26-dns-provider-contract.md (workf
 
 ---
 
-## PR 6 — workflow: relocate dns policy/gate/audit + dns-policy commands + OnBeforeAction hook
+## PR 7 — workflow: relocate dns policy/gate/audit + dns-policy commands + OnBeforeAction hook
 
 **Repo:** `/Users/jon/workspace/workflow`
 **Branch:** `feat/wfctl-dns-policy-2026-05-26T1900`
 
-**Wait for**: PR 5 merged.
+**Wait for**: PR 6 merged.
 
-### Task 18: Add OnBeforeAction hook to ApplyPlanHooks
+### Task 19: Add OnBeforeAction hook to ApplyPlanHooks
 
 **Files:**
 - Modify: `iac/wfctlhelpers/apply.go:91-110` (ApplyPlanHooks struct + callers)
@@ -1311,7 +1311,7 @@ git add iac/wfctlhelpers/apply.go iac/wfctlhelpers/apply_test.go
 git commit -m "feat(iac): add OnBeforeAction fatal hook to ApplyPlanHooks"
 ```
 
-### Task 19: Relocate dnspolicy package
+### Task 20: Relocate dnspolicy package
 
 **Files:**
 - Create: `dns/policy/parse.go`, `dns/policy/policy.go`, `dns/policy/match.go`, `dns/policy/reader.go`, `dns/policy/writer.go`, `dns/policy/serialize.go` (copy from `workflow-plugin-infra/internal/dnspolicy/`)
@@ -1342,7 +1342,7 @@ git add dns/policy/
 git commit -m "feat(dns/policy): relocate parser from workflow-plugin-infra/internal/dnspolicy"
 ```
 
-### Task 20: Relocate dnsgate package + adapt to driver-based dispatch
+### Task 21: Relocate dnsgate package + adapt to driver-based dispatch
 
 **Files:**
 - Create: `dns/gate/gate.go` (new; mirrors `workflow-plugin-infra/internal/dnsgate/gate.go` but dispatches via `interfaces.ResourceDriver` not `dnspolicy.Adapter`)
@@ -1414,7 +1414,7 @@ git add dns/gate/
 git commit -m "feat(dns/gate): relocate gate; adapt to ResourceDriver.Read TXT scanning"
 ```
 
-### Task 21: Relocate dnsaudit package
+### Task 22: Relocate dnsaudit package
 
 **Files:**
 - Create: `dns/audit/audit.go`, `dns/audit/audit_test.go` (copy + rename from `workflow-plugin-infra/internal/dnsaudit/`)
@@ -1441,7 +1441,7 @@ git add dns/audit/
 git commit -m "feat(dns/audit): relocate trail to wfctl-builtin path; one-time migration"
 ```
 
-### Task 22: Add wfctl dns-policy commands (show, set, transfer-ownership, drift)
+### Task 23: Add wfctl dns-policy commands (show, set, transfer-ownership, drift)
 
 **Files:**
 - Create: `cmd/wfctl/dns_policy.go`
@@ -1541,7 +1541,7 @@ git add cmd/wfctl/dns_policy.go cmd/wfctl/dns_policy_test.go cmd/wfctl/main.go c
 git commit -m "feat(wfctl): add dns-policy command (show/set/transfer-ownership/drift)"
 ```
 
-### Task 23: Wire dns-gate as OnBeforeAction for infra.dns resources
+### Task 24: Wire dns-gate as OnBeforeAction for infra.dns resources
 
 **Files:**
 - Modify: `cmd/wfctl/infra.go` (`runInfraApply` constructs `ApplyPlanHooks` — wire `OnBeforeAction` to dns/gate when `infra.dns` resources present)
@@ -1578,7 +1578,7 @@ git add cmd/wfctl/infra.go cmd/wfctl/infra_apply_test.go
 git commit -m "feat(wfctl): wire dns-gate as OnBeforeAction for infra.dns resources during apply"
 ```
 
-### Task 24: Runtime-launch validation + push branch + open PR
+### Task 25: Runtime-launch validation + push branch + open PR
 
 **Files:**
 - (none directly)
@@ -1628,14 +1628,14 @@ Design: workflow-plugin-infra/docs/plans/2026-05-26-dns-provider-contract-design
 
 ---
 
-## PR 7 — workflow-plugin-infra: strip libdns + admincli + dns packages + remove dns_record step
+## PR 8 — workflow-plugin-infra: strip libdns + admincli + dns packages + remove dns_record step
 
 **Repo:** `/Users/jon/workspace/workflow-plugin-infra`
 **Branch:** `refactor/strip-dns-libdns-2026-05-26T1900`
 
-**Wait for**: PR 6 merged + tagged.
+**Wait for**: PR 7 merged + tagged.
 
-### Task 25: Delete admincli + dnsprovider + dnspolicy + dnsgate + dnsaudit packages
+### Task 26: Delete admincli + dnsprovider + dnspolicy + dnsgate + dnsaudit packages
 
 **Files:**
 - Delete: `internal/admincli/` (entire directory)
@@ -1649,7 +1649,7 @@ Design: workflow-plugin-infra/docs/plans/2026-05-26-dns-provider-contract-design
 ```bash
 git rm -r internal/admincli internal/dnsprovider internal/dnspolicy internal/dnsgate internal/dnsaudit
 grep -rn 'workflow-plugin-infra/internal/dns\|workflow-plugin-infra/internal/admincli' . | grep -v _worktrees
-# Expect: zero hits (plugin.go callers handled in Task 26)
+# Expect: zero hits (plugin.go callers handled in Task 27)
 ```
 
 **Step 2: Commit**
@@ -1658,7 +1658,7 @@ grep -rn 'workflow-plugin-infra/internal/dns\|workflow-plugin-infra/internal/adm
 git commit -m "refactor: delete admincli + dnspolicy/gate/audit/provider packages (relocated to workflow)"
 ```
 
-### Task 26: Remove DNSRecordStepConfig from proto + drop step handler + drop infra.dns_record step type
+### Task 27: Remove DNSRecordStepConfig from proto + drop step handler + drop infra.dns_record step type
 
 **Files:**
 - Modify: `internal/contracts/infra.proto` (delete `DNSRecordStepConfig` message)
@@ -1702,7 +1702,7 @@ git add internal/contracts/infra.proto internal/plugin.go internal/contracts/*.p
 git commit -m "refactor: remove infra.dns_record step + DNSRecordStepConfig proto (peer-dispatch infeasible)"
 ```
 
-### Task 27: Drop libdns deps from go.mod + remove infra-dns cliCommand
+### Task 28: Drop libdns deps from go.mod + remove infra-dns cliCommand
 
 **Files:**
 - Modify: `go.mod`
@@ -1739,7 +1739,7 @@ git add go.mod go.sum plugin.json
 git commit -m "refactor: drop libdns/* deps + infra-dns cliCommand (Phase 3b)"
 ```
 
-### Task 28: Major version bump + push + PR
+### Task 29: Major version bump + push + PR
 
 **Files:**
 - Modify: `plugin.json` (version field)
@@ -1777,10 +1777,10 @@ Changes:
 - DELETE internal/admincli, internal/dnsprovider, internal/dnspolicy, internal/dnsgate, internal/dnsaudit
 - DROP libdns/* deps from go.mod
 - REMOVE infra.dns_record step type + DNSRecordStepConfig proto (peer-dispatch infeasible from step handler context; per-record workflows route through wfctl infra apply or wfctl dns-policy *)
-- REMOVE infra-dns cliCommand (commands moved to wfctl dns-policy builtin in PR 6)
+- REMOVE infra-dns cliCommand (commands moved to wfctl dns-policy builtin in PR 7)
 - BUMP to v1.0.0 (capability surface shrink + breaking proto change)
 
-Rollback: revert commit + ensure PR 6 is also reverted (revert PR 7 first, then PR 6 — see design doc Rollback section). After revert, libdns + admincli code restored from git history.
+Rollback: revert commit + ensure PR 7 is also reverted (revert PR 8 first, then PR 7 — see design doc Rollback section). After revert, libdns + admincli code restored from git history.
 
 Runtime-launch-validation: post-merge, verify wfctl loads workflow-plugin-infra v1.0.0 without dns-related capability errors + wfctl plugin verify-capabilities passes.
 
@@ -1790,16 +1790,16 @@ Design: docs/plans/2026-05-26-dns-provider-contract-design.md" \
 
 ---
 
-## PR 8 — workflow-scenarios: DNS orchestration scenarios + stub provider plugin
+## PR 9 — workflow-scenarios: DNS orchestration scenarios + stub provider plugin
 
 **Repo:** `/Users/jon/workspace/workflow-scenarios`
 **Branch:** `feat/dns-orchestration-2026-05-26T1900`
 
-**Wait for**: PR 5 + PR 6 + PR 7 merged.
+**Wait for**: PR 6 + PR 7 + PR 8 merged.
 
 **Cycle-2 finding I6**: scenarios use canonical `scenarios/<id>-<name>/` layout with `config/` + `test/` subdirs, NOT a flat `dns/` directory at repo root. Highest existing scenario ID is 88 (`88-iac-dns-replay-migration`). New DNS scenarios use IDs 89/90/91. Stub plugin (shared by all three) lives at `scenarios/lib/dns-stub-plugin/`.
 
-### Task 29: Build stub IaCProvider gRPC plugin
+### Task 30: Build stub IaCProvider gRPC plugin
 
 **Files:**
 - Create: `scenarios/lib/dns-stub-plugin/main.go`
@@ -1895,7 +1895,7 @@ git add scenarios/lib/dns-stub-plugin/
 git commit -m "feat(scenarios): stub IaCProvider gRPC plugin for DNS orchestration tests"
 ```
 
-### Task 30: Scenario 89 — dns-import-export-roundtrip
+### Task 31: Scenario 89 — dns-import-export-roundtrip
 
 **Files:**
 - Create: `scenarios/89-dns-import-export-roundtrip/scenario.yaml`
@@ -1957,7 +1957,7 @@ git add scenarios/89-dns-import-export-roundtrip/
 git commit -m "feat(scenarios): 89 dns-import-export-roundtrip — import then plan NoOp"
 ```
 
-### Task 31: Scenario 90 — dns-cross-provider-transfer
+### Task 32: Scenario 90 — dns-cross-provider-transfer
 
 **Files:**
 - Create: `scenarios/90-dns-cross-provider-transfer/scenario.yaml`
@@ -2032,7 +2032,7 @@ git add scenarios/90-dns-cross-provider-transfer/
 git commit -m "feat(scenarios): 90 dns-cross-provider-transfer with lossiness charter (per-record-type exclusions)"
 ```
 
-### Task 32: Scenario 91 — dns-delegation + scenarios.json registration + open PR
+### Task 33: Scenario 91 — dns-delegation + scenarios.json registration + open PR
 
 **Files:**
 - Create: `scenarios/91-dns-delegation/scenario.yaml`
@@ -2135,7 +2135,7 @@ Design: workflow-plugin-infra/docs/plans/2026-05-26-dns-provider-contract-design
 | 2026-05-26 | codingsloth@pm.me | Initial plan draft (cycle 1). Mirrors design cycle 3.5. 8 PRs, 32 tasks, 6 repos. |
 | 2026-05-26 | codingsloth@pm.me | Plan cycle 7 — addresses 3 compile errors in cycle-6 helper. (C1-C3-CYCLE6) `resolveProviderModuleByName` helper rewritten as exact line-for-line mirror of existing `resolveProviderForSpec` (`workflow/cmd/wfctl/infra.go:1150-1180`) after reading the actual source. Fixes: (a) `for i := range cfg.Modules` + `m := &cfg.Modules[i]` (pointer receiver requires addressable element, range-by-value can't satisfy); (b) `resolved, ok := m.ResolveForEnv(envName)` with `if !ok` guard (returns `(*ResolvedModule, bool)` not `error`); (c) `modCfg := config.ExpandEnvInMapPreservingKeys(...)` single-value assignment (returns `map[string]any`, not `(map, error)`); (d) added `envName == ""` branch using `m.Config` directly. |
 | 2026-05-26 | codingsloth@pm.me | Plan cycle 6 — addresses adversarial cycle 5 findings (all 3 fact-verified before applying). (C1-CYCLE5) `resolveProviderModuleByName` was returning `m.Type` (always literal `"iac.provider"`) but the caller needs the plugin discriminator from `modCfg["provider"].(string)` — verified by reading `resolveProviderForSpec` at `infra.go:1174`. Helper rewritten to mirror the existing function's resolution pattern including `m.ResolveForEnv(envName)` + `config.ExpandEnvInMapPreservingKeys(...)`. (C2-CYCLE5) `loadConfig(cfgFile, envName)` doesn't exist; corrected to `config.LoadFromFile(cfgFile)` (single arg) — verified `infra.go:221`. (I1-CYCLE5) `--plugin-dir` is per-subcommand flag not global — verified at `infra.go:258-259`. Switched all scenario run.sh scripts to use `export WFCTL_PLUGIN_DIR=/tmp` env var at top (verified env var support same line). Cleaner than per-invocation flag. |
-| 2026-05-26 | codingsloth@pm.me | Plan cycle 5 — addresses adversarial cycle 4 findings (verified facts against actual repos before applying). (C1-CYCLE4) workflow-registry layout: `plugins/<short-name>/manifest.json` (NO `workflow-plugin-` prefix; verified by `ls plugins/`). Cloudflare DOES NOT exist in registry today — Task 13.5 reframed as `plugins/cloudflare/manifest.json` CREATE + 3 existing modifies. `validate-manifests.sh` path is `scripts/validate-manifests.sh` (verified). (C2-CYCLE4) `interfaces.IaCProvider.Import` returns `(*ResourceState, error)` not `(*ResourceOutput, error)` (verified iac_provider.go:30). Task 15 importFn stub + Task 29 stub plugin Import method both corrected. (I1-CYCLE4) Task 32 jq paths corrected: `.applied_config.records` not `.config.records` (ResourceState field tag is `json:"applied_config"` per iac_state.go:37); operator position fixed for length check. (I2-CYCLE4) `--provider` semantic explicitly specified: module name, not plugin type. `resolveProviderModuleByName` helper specified inline (~12 LOC). (M3) `--plugin-dir=/tmp` added to all `wfctl infra apply` + `wfctl infra import-all` invocations in scenario run.sh scripts. |
-| 2026-05-26 | codingsloth@pm.me | Plan cycle 4 — addresses adversarial cycle 3 findings. (C1-CYCLE3) `wfctl infra apply` has NO `--provider` flag — provider derives from config's `iac.provider` module. Task 31 reworked to paired source/target config pattern (no translate script). (I1-CYCLE3) workflow-registry stores manifests at `plugins/<name>/manifest.json`, NOT `manifests/*.yaml`. Task 13.5 paths + format corrected; uses repo's own `validate-manifests.sh` for preflight. (I2-CYCLE3) `sleep 5` dropped; PR number captured atomically from `gh pr create` stdout. (I3-CYCLE3) `translate-state-to-config.py` helper deleted entirely (reviewer Option 2 — paired fixture+config pair eliminates state→config schema gap). (M1) `sed -i ''` BSD-only → `perl -pi -e` for portability across Tasks 19/20/21. (M2) stub plugin Import method now has explicit YAML fixture lookup implementation, not a TODO placeholder. |
-| 2026-05-26 | codingsloth@pm.me | Plan cycle 3 — addresses adversarial cycle 2 findings. (C2-NEW) Task 15 runtime dispatch now asserts `interfaces.EnumeratorAll` not `interfaces.Enumerator` (the original I1 fix was applied to the compile-time assertion only, missed the runtime dispatch). (C3-NEW) CF test stub dropped reference to nonexistent `pagination.NewArrayAutoPagerFromSlice`; instead define minimal `zonePager` interface (`Next() bool / Current() Zone / Err() error`) that both the real AutoPager and a `slicePager` test fake satisfy. (C4-NEW) `wfctl plugin registry-validate` doesn't exist; replaced with explicit Go-test or `wfctl plugin validate <path>` per-manifest fallback. (I1-CYCLE2) Task 31 reworked to use config-driven cross-provider apply path (no `--state-file` flag; added `translate-state-to-config.py` helper). (I2-CYCLE2) `dumpStateToFile` now has explicit implementation block w/ `infraStateStore.ListResources` extension note. |
-| 2026-05-26 | codingsloth@pm.me | Plan cycle 2 — addresses adversarial cycle 1 findings. (C1) CF cfProvider injected `zones zoneListerCF` interface field; iterator pattern uses cloudflare-go/v7 AutoPager Next()/Current()/Err() not iter.Seq2. (C2) NC types corrected: `DomainsGetListCommandResponse`, `IsOurDNS *bool`, `Expires *DateTime`, subservice `client.Domains.GetList`, `*int` pointer args. (C3) DO `Links.CurrentPage()` single int return; loop terminates via `IsLastPage()`. (C4) Hover prerequisite git pull added; module-path note clarifies pkg/hoverclient is subpath of parent module (tag parent at v0.4.0); fixed `Domain.Name` field (was `DomainName`). (C5) `--output`/`-o` flag added to import-all; scenarios use it. (I1) interface assertion `interfaces.EnumeratorAll` not `Enumerator`. (I2) `infraStateStore` (package-private) not `interfaces.IaCStateStore`. (I3) variable `configFile` not `cfgFile`. (I4) Task 24 runtime-launch-validation step added: build wfctl + invoke --help on new commands + verify --required error paths. (I5) PR 4.5 + Task 13.5 added for workflow-registry pin-bump batched per `feedback_version_bump_immediate_merge.md`. (I6) scenario layout normalized to canonical `scenarios/<id>-<name>/{scenario.yaml,config/,test/}` with IDs 89/90/91; stub plugin moved to `scenarios/lib/dns-stub-plugin/`; PASS/FAIL/SKIP counter pattern adopted; scenarios.json registration tasked. Plan now 9 PRs, 33 tasks, 7 repos. |
+| 2026-05-26 | codingsloth@pm.me | Plan cycle 5 — addresses adversarial cycle 4 findings (verified facts against actual repos before applying). (C1-CYCLE4) workflow-registry layout: `plugins/<short-name>/manifest.json` (NO `workflow-plugin-` prefix; verified by `ls plugins/`). Cloudflare DOES NOT exist in registry today — Task 14 reframed as `plugins/cloudflare/manifest.json` CREATE + 3 existing modifies. `validate-manifests.sh` path is `scripts/validate-manifests.sh` (verified). (C2-CYCLE4) `interfaces.IaCProvider.Import` returns `(*ResourceState, error)` not `(*ResourceOutput, error)` (verified iac_provider.go:30). Task 16 importFn stub + Task 30 stub plugin Import method both corrected. (I1-CYCLE4) Task 33 jq paths corrected: `.applied_config.records` not `.config.records` (ResourceState field tag is `json:"applied_config"` per iac_state.go:37); operator position fixed for length check. (I2-CYCLE4) `--provider` semantic explicitly specified: module name, not plugin type. `resolveProviderModuleByName` helper specified inline (~12 LOC). (M3) `--plugin-dir=/tmp` added to all `wfctl infra apply` + `wfctl infra import-all` invocations in scenario run.sh scripts. |
+| 2026-05-26 | codingsloth@pm.me | Plan cycle 4 — addresses adversarial cycle 3 findings. (C1-CYCLE3) `wfctl infra apply` has NO `--provider` flag — provider derives from config's `iac.provider` module. Task 32 reworked to paired source/target config pattern (no translate script). (I1-CYCLE3) workflow-registry stores manifests at `plugins/<name>/manifest.json`, NOT `manifests/*.yaml`. Task 14 paths + format corrected; uses repo's own `validate-manifests.sh` for preflight. (I2-CYCLE3) `sleep 5` dropped; PR number captured atomically from `gh pr create` stdout. (I3-CYCLE3) `translate-state-to-config.py` helper deleted entirely (reviewer Option 2 — paired fixture+config pair eliminates state→config schema gap). (M1) `sed -i ''` BSD-only → `perl -pi -e` for portability across Tasks 19/20/21. (M2) stub plugin Import method now has explicit YAML fixture lookup implementation, not a TODO placeholder. |
+| 2026-05-26 | codingsloth@pm.me | Plan cycle 3 — addresses adversarial cycle 2 findings. (C2-NEW) Task 16 runtime dispatch now asserts `interfaces.EnumeratorAll` not `interfaces.Enumerator` (the original I1 fix was applied to the compile-time assertion only, missed the runtime dispatch). (C3-NEW) CF test stub dropped reference to nonexistent `pagination.NewArrayAutoPagerFromSlice`; instead define minimal `zonePager` interface (`Next() bool / Current() Zone / Err() error`) that both the real AutoPager and a `slicePager` test fake satisfy. (C4-NEW) `wfctl plugin registry-validate` doesn't exist; replaced with explicit Go-test or `wfctl plugin validate <path>` per-manifest fallback. (I1-CYCLE2) Task 32 reworked to use config-driven cross-provider apply path (no `--state-file` flag; added `translate-state-to-config.py` helper). (I2-CYCLE2) `dumpStateToFile` now has explicit implementation block w/ `infraStateStore.ListResources` extension note. |
+| 2026-05-26 | codingsloth@pm.me | Plan cycle 2 — addresses adversarial cycle 1 findings. (C1) CF cfProvider injected `zones zoneListerCF` interface field; iterator pattern uses cloudflare-go/v7 AutoPager Next()/Current()/Err() not iter.Seq2. (C2) NC types corrected: `DomainsGetListCommandResponse`, `IsOurDNS *bool`, `Expires *DateTime`, subservice `client.Domains.GetList`, `*int` pointer args. (C3) DO `Links.CurrentPage()` single int return; loop terminates via `IsLastPage()`. (C4) Hover prerequisite git pull added; module-path note clarifies pkg/hoverclient is subpath of parent module (tag parent at v0.4.0); fixed `Domain.Name` field (was `DomainName`). (C5) `--output`/`-o` flag added to import-all; scenarios use it. (I1) interface assertion `interfaces.EnumeratorAll` not `Enumerator`. (I2) `infraStateStore` (package-private) not `interfaces.IaCStateStore`. (I3) variable `configFile` not `cfgFile`. (I4) Task 25 runtime-launch-validation step added: build wfctl + invoke --help on new commands + verify --required error paths. (I5) PR 5 + Task 14 added for workflow-registry pin-bump batched per `feedback_version_bump_immediate_merge.md`. (I6) scenario layout normalized to canonical `scenarios/<id>-<name>/{scenario.yaml,config/,test/}` with IDs 89/90/91; stub plugin moved to `scenarios/lib/dns-stub-plugin/`; PASS/FAIL/SKIP counter pattern adopted; scenarios.json registration tasked. Plan now 9 PRs, 33 tasks, 7 repos. |
