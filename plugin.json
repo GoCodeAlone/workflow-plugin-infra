@@ -1,6 +1,6 @@
 {
     "name": "workflow-plugin-infra",
-    "version": "1.0.0",
+    "version": "0.0.0",
     "description": "Abstract infra.* module types (13 types) with IaCProvider delegation",
     "author": "GoCodeAlone",
     "license": "MIT",
