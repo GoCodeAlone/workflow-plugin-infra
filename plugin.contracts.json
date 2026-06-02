@@ -78,6 +78,21 @@
       "type": "infra.certificate",
       "mode": "strict",
       "config": "workflow.plugins.infra.v1.CertificateConfig"
+    },
+    {
+      "kind": "module",
+      "type": "infra.admin",
+      "mode": "strict",
+      "config": "workflow.plugins.infra.admin.v1.InfraAdminConfig"
+    },
+    {
+      "kind": "service_method",
+      "type": "infra.admin",
+      "serviceName": "InfraAdmin",
+      "method": "AdminContribution",
+      "mode": "strict",
+      "input": "workflow.plugins.infra.admin.v1.GetAdminContributionInput",
+      "output": "workflow.plugins.infra.admin.v1.GetAdminContributionOutput"
     }
   ]
 }

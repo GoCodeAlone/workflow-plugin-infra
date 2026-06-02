@@ -45,6 +45,9 @@ func TestContractRegistryDeclaresStrictModuleContracts(t *testing.T) {
 		if contract.Kind == pb.ContractKind_CONTRACT_KIND_STEP {
 			continue // step contracts validated in TestContractDeclaresStrictStepContracts
 		}
+		if contract.Kind == pb.ContractKind_CONTRACT_KIND_SERVICE {
+			continue // service method contracts (e.g. AdminContribution) tracked separately
+		}
 		if contract.Kind != pb.ContractKind_CONTRACT_KIND_MODULE {
 			t.Fatalf("unexpected contract kind %s", contract.Kind)
 		}
@@ -190,6 +193,91 @@ func TestContractRegistry_HasNoStepContractsPostPhase3b(t *testing.T) {
 	}
 }
 
+// TestInfraAdminModuleReturnsAdminContribution verifies the infra.admin module
+// implements ServiceInvoker and returns the expected AdminContribution descriptor.
+func TestInfraAdminModuleReturnsAdminContribution(t *testing.T) {
+	mp := NewInfraPlugin().(sdk.ModuleProvider)
+	module, err := mp.CreateModule("infra.admin", "infra-admin", map[string]any{
+		"api_base_path": "/api/infra",
+		"prefix":        "/admin/infra",
+	})
+	if err != nil {
+		t.Fatalf("CreateModule(infra.admin): %v", err)
+	}
+
+	type serviceInvoker interface {
+		InvokeMethod(method string, input map[string]any) (map[string]any, error)
+	}
+	invoker, ok := module.(serviceInvoker)
+	if !ok {
+		t.Fatalf("infra.admin module type %T must implement ServiceInvoker", module)
+	}
+
+	out, err := invoker.InvokeMethod("AdminContribution", nil)
+	if err != nil {
+		t.Fatalf("InvokeMethod(AdminContribution): %v", err)
+	}
+
+	enabled, _ := out["enabled"].(bool)
+	if !enabled {
+		t.Errorf("expected enabled=true, got %v", out["enabled"])
+	}
+
+	contribution, ok := out["contribution"].(map[string]any)
+	if !ok {
+		t.Fatalf("contribution = %T, want map[string]any", out["contribution"])
+	}
+
+	checks := map[string]string{
+		"id":          "infra-resources",
+		"title":       "Infrastructure",
+		"category":    "operations",
+		"path":        "/admin/infra",
+		"render_mode": "iframe",
+	}
+	for field, want := range checks {
+		if got, _ := contribution[field].(string); got != want {
+			t.Errorf("contribution[%q] = %q, want %q", field, got, want)
+		}
+	}
+
+	permissions, ok := contribution["permissions"].([]string)
+	if !ok || len(permissions) == 0 {
+		t.Errorf("permissions = %#v, want non-empty []string", contribution["permissions"])
+	}
+
+	// Verify infra.admin is in ModuleTypes.
+	p := NewInfraPlugin()
+	found := false
+	for _, mt := range mp.(interface{ ModuleTypes() []string }).ModuleTypes() {
+		if mt == "infra.admin" {
+			found = true
+			break
+		}
+	}
+	_ = p
+	if !found {
+		t.Error("infra.admin not in plugin.ModuleTypes()")
+	}
+}
+
+// TestInfraAdminModuleUnsupportedMethod verifies InvokeMethod returns an error
+// for unknown method names.
+func TestInfraAdminModuleUnsupportedMethod(t *testing.T) {
+	mp := NewInfraPlugin().(sdk.ModuleProvider)
+	module, err := mp.CreateModule("infra.admin", "infra-admin", nil)
+	if err != nil {
+		t.Fatalf("CreateModule: %v", err)
+	}
+	type serviceInvoker interface {
+		InvokeMethod(method string, input map[string]any) (map[string]any, error)
+	}
+	invoker := module.(serviceInvoker)
+	if _, err := invoker.InvokeMethod("Unknown", nil); err == nil {
+		t.Error("InvokeMethod(Unknown) should return error")
+	}
+}
+
 type manifestContract struct {
 	Mode          string `json:"mode"`
 	ConfigMessage string `json:"config"`
@@ -223,6 +311,9 @@ func loadManifestContracts(t *testing.T) map[string]manifestContract {
 	for _, contract := range manifest.Contracts {
 		if contract.Kind == "step" {
 			continue // skip; step contracts loaded separately
+		}
+		if contract.Kind == "service_method" {
+			continue // skip; service method contracts tracked separately
 		}
 		if contract.Kind != "module" {
 			t.Fatalf("unexpected contract kind %q in plugin.contracts.json", contract.Kind)

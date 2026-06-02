@@ -1,0 +1,32 @@
+syntax = "proto3";
+
+package workflow.plugins.infra.admin.v1;
+
+option go_package = "github.com/GoCodeAlone/workflow-plugin-infra/internal/contracts;contracts";
+
+message InfraAdminContributionConfig {
+  bool enabled = 1;
+  string module = 2;
+  string id = 3;
+  string title = 4;
+  string category = 5;
+  string path = 6;
+  string render_mode = 7;
+  string app_context = 8;
+  repeated string permissions = 9;
+}
+
+message InfraAdminConfig {
+  string api_base_path = 1;
+  string prefix = 2;
+  InfraAdminContributionConfig admin = 3;
+}
+
+message GetAdminContributionInput {
+}
+
+message GetAdminContributionOutput {
+  bool enabled = 1;
+  InfraAdminContributionConfig contribution = 2;
+  string error = 100;
+}
