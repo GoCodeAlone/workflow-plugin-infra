@@ -13,6 +13,7 @@ import (
 	"google.golang.org/protobuf/reflect/protodesc"
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/types/known/anypb"
+	"gopkg.in/yaml.v3"
 )
 
 func TestInfraPluginImplementsStrictContractProviders(t *testing.T) {
@@ -44,6 +45,9 @@ func TestContractRegistryDeclaresStrictModuleContracts(t *testing.T) {
 	for _, contract := range registry.Contracts {
 		if contract.Kind == pb.ContractKind_CONTRACT_KIND_STEP {
 			continue // step contracts validated in TestContractDeclaresStrictStepContracts
+		}
+		if contract.Kind == pb.ContractKind_CONTRACT_KIND_SERVICE {
+			continue // service method contracts (e.g. AdminContribution) tracked separately
 		}
 		if contract.Kind != pb.ContractKind_CONTRACT_KIND_MODULE {
 			t.Fatalf("unexpected contract kind %s", contract.Kind)
@@ -190,6 +194,255 @@ func TestContractRegistry_HasNoStepContractsPostPhase3b(t *testing.T) {
 	}
 }
 
+// TestPluginImplementsConfigProvider verifies that the plugin implements sdk.ConfigProvider
+// and that ConfigFragment() succeeds and returns valid YAML. The ui_dist assets are embedded
+// at compile time so this must work in all test environments.
+func TestPluginImplementsConfigProvider(t *testing.T) {
+	p := NewInfraPlugin()
+	cp, ok := p.(sdk.ConfigProvider)
+	if !ok {
+		t.Fatal("plugin does not implement sdk.ConfigProvider")
+	}
+	fragment, err := cp.ConfigFragment()
+	if err != nil {
+		t.Fatalf("ConfigFragment returned unexpected error: %v", err)
+	}
+	if len(fragment) == 0 {
+		t.Error("ConfigFragment returned empty byte slice")
+	}
+	var parsed map[string]any
+	if err := yaml.Unmarshal(fragment, &parsed); err != nil {
+		t.Errorf("ConfigFragment returned invalid YAML: %v", err)
+	}
+}
+
+// TestConfigDataContainsStaticFileserver verifies the embedded config declares
+// a static.fileserver module (required for serving the SPA).
+func TestConfigDataContainsStaticFileserver(t *testing.T) {
+	var cfg map[string]any
+	if err := yaml.Unmarshal(configData, &cfg); err != nil {
+		t.Fatalf("parse config: %v", err)
+	}
+	modules, ok := cfg["modules"].([]any)
+	if !ok {
+		t.Fatal("'modules' is not a list")
+	}
+	found := false
+	for _, m := range modules {
+		mod, ok := m.(map[string]any)
+		if !ok {
+			continue
+		}
+		if modType, _ := mod["type"].(string); modType == "static.fileserver" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("embedded config.yaml does not declare a static.fileserver module")
+	}
+}
+
+// TestInfraAdminModuleReturnsAdminContribution verifies the infra.admin module
+// implements ServiceInvoker and returns the expected AdminContribution descriptor.
+func TestInfraAdminModuleReturnsAdminContribution(t *testing.T) {
+	mp := NewInfraPlugin().(sdk.ModuleProvider)
+	module, err := mp.CreateModule("infra.admin", "infra-admin", map[string]any{
+		"api_base_path": "/api/infra",
+		"prefix":        "/admin/infra",
+	})
+	if err != nil {
+		t.Fatalf("CreateModule(infra.admin): %v", err)
+	}
+
+	type serviceInvoker interface {
+		InvokeMethod(method string, input map[string]any) (map[string]any, error)
+	}
+	invoker, ok := module.(serviceInvoker)
+	if !ok {
+		t.Fatalf("infra.admin module type %T must implement ServiceInvoker", module)
+	}
+
+	out, err := invoker.InvokeMethod("AdminContribution", nil)
+	if err != nil {
+		t.Fatalf("InvokeMethod(AdminContribution): %v", err)
+	}
+
+	enabled, _ := out["enabled"].(bool)
+	if !enabled {
+		t.Errorf("expected enabled=true, got %v", out["enabled"])
+	}
+
+	contribution, ok := out["contribution"].(map[string]any)
+	if !ok {
+		t.Fatalf("contribution = %T, want map[string]any", out["contribution"])
+	}
+
+	checks := map[string]string{
+		"id":          "infra-resources",
+		"title":       "Infrastructure",
+		"category":    "operations",
+		"path":        "/admin/infra",
+		"render_mode": "iframe",
+	}
+	for field, want := range checks {
+		if got, _ := contribution[field].(string); got != want {
+			t.Errorf("contribution[%q] = %q, want %q", field, got, want)
+		}
+	}
+
+	permissions, ok := contribution["permissions"].([]string)
+	if !ok || len(permissions) == 0 {
+		t.Errorf("permissions = %#v, want non-empty []string", contribution["permissions"])
+	}
+
+	// Verify infra.admin is in ModuleTypes.
+	found := false
+	for _, mt := range mp.(interface{ ModuleTypes() []string }).ModuleTypes() {
+		if mt == "infra.admin" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("infra.admin not in plugin.ModuleTypes()")
+	}
+}
+
+// TestInfraAdminModuleUnsupportedMethod verifies InvokeMethod returns an error
+// for unknown method names.
+func TestInfraAdminModuleUnsupportedMethod(t *testing.T) {
+	mp := NewInfraPlugin().(sdk.ModuleProvider)
+	module, err := mp.CreateModule("infra.admin", "infra-admin", nil)
+	if err != nil {
+		t.Fatalf("CreateModule: %v", err)
+	}
+	type serviceInvoker interface {
+		InvokeMethod(method string, input map[string]any) (map[string]any, error)
+	}
+	invoker := module.(serviceInvoker)
+	if _, err := invoker.InvokeMethod("Unknown", nil); err == nil {
+		t.Error("InvokeMethod(Unknown) should return error")
+	}
+}
+
+// TestCreateTypedModule_InfraAdmin_AdminContribution exercises the typed-factory
+// path for infra.admin: struct→map translation in CreateTypedModule and the
+// InvokeMethod("AdminContribution") return value, including:
+//   - fully-populated InfraAdminConfig (custom path, title, permissions)
+//   - nil GetAdmin() (omitted sub-message) falls back to defaults
+func TestCreateTypedModule_InfraAdmin_AdminContribution(t *testing.T) {
+	provider := NewInfraPlugin().(sdk.TypedModuleProvider)
+
+	type serviceInvoker interface {
+		InvokeMethod(method string, input map[string]any) (map[string]any, error)
+	}
+
+	t.Run("fully_populated", func(t *testing.T) {
+		cfg := &contracts.InfraAdminConfig{
+			ApiBasePath: "/api/infra",
+			Prefix:      "/admin/infra",
+			Admin: &contracts.InfraAdminContributionConfig{
+				Enabled:     true,
+				Id:          "my-infra",
+				Title:       "My Infra",
+				Category:    "platform",
+				Path:        "/admin/my-infra",
+				RenderMode:  "iframe",
+				AppContext:  "app",
+				Permissions: []string{"infra:read", "infra:apply"},
+			},
+		}
+		packed, err := anypb.New(cfg)
+		if err != nil {
+			t.Fatalf("anypb.New: %v", err)
+		}
+		mod, err := provider.CreateTypedModule("infra.admin", "test-admin", packed)
+		if err != nil {
+			t.Fatalf("CreateTypedModule: %v", err)
+		}
+		invoker, ok := mod.(serviceInvoker)
+		if !ok {
+			t.Fatalf("module type %T does not implement InvokeMethod", mod)
+		}
+		out, err := invoker.InvokeMethod("AdminContribution", nil)
+		if err != nil {
+			t.Fatalf("InvokeMethod: %v", err)
+		}
+		if got, _ := out["enabled"].(bool); !got {
+			t.Errorf("enabled = %v, want true", out["enabled"])
+		}
+		contribution, ok := out["contribution"].(map[string]any)
+		if !ok {
+			t.Fatalf("contribution type = %T, want map[string]any", out["contribution"])
+		}
+		checks := map[string]string{
+			"id":          "my-infra",
+			"title":       "My Infra",
+			"category":    "platform",
+			"path":        "/admin/my-infra",
+			"render_mode": "iframe",
+		}
+		for field, want := range checks {
+			if got, _ := contribution[field].(string); got != want {
+				t.Errorf("contribution[%q] = %q, want %q", field, got, want)
+			}
+		}
+		perms := strSliceVal(contribution["permissions"])
+		if len(perms) != 2 || perms[0] != "infra:read" {
+			t.Errorf("permissions = %v, want [infra:read infra:apply]", perms)
+		}
+	})
+
+	t.Run("nil_admin_uses_defaults", func(t *testing.T) {
+		// InfraAdminConfig with no Admin sub-message: GetAdmin() returns nil.
+		// CreateTypedModule must skip the admin map and let adminContributionFromConfig
+		// fall back to its built-in defaults.
+		cfg := &contracts.InfraAdminConfig{
+			ApiBasePath: "/api/infra",
+			Prefix:      "/admin/infra",
+			// Admin intentionally omitted
+		}
+		packed, err := anypb.New(cfg)
+		if err != nil {
+			t.Fatalf("anypb.New: %v", err)
+		}
+		mod, err := provider.CreateTypedModule("infra.admin", "test-admin-defaults", packed)
+		if err != nil {
+			t.Fatalf("CreateTypedModule: %v", err)
+		}
+		invoker := mod.(serviceInvoker)
+		out, err := invoker.InvokeMethod("AdminContribution", nil)
+		if err != nil {
+			t.Fatalf("InvokeMethod: %v", err)
+		}
+		if got, _ := out["enabled"].(bool); !got {
+			t.Errorf("enabled = %v, want true (default)", out["enabled"])
+		}
+		contribution, ok := out["contribution"].(map[string]any)
+		if !ok {
+			t.Fatalf("contribution type = %T, want map[string]any", out["contribution"])
+		}
+		// Defaults from adminContributionFromConfig
+		defaults := map[string]string{
+			"id":          "infra-resources",
+			"title":       "Infrastructure",
+			"category":    "operations",
+			"path":        "/admin/infra", // falls back to Prefix
+			"render_mode": "iframe",
+		}
+		for field, want := range defaults {
+			if got, _ := contribution[field].(string); got != want {
+				t.Errorf("default contribution[%q] = %q, want %q", field, got, want)
+			}
+		}
+		perms := strSliceVal(contribution["permissions"])
+		if len(perms) == 0 {
+			t.Error("default permissions should be non-empty")
+		}
+	})
+}
+
 type manifestContract struct {
 	Mode          string `json:"mode"`
 	ConfigMessage string `json:"config"`
@@ -223,6 +476,9 @@ func loadManifestContracts(t *testing.T) map[string]manifestContract {
 	for _, contract := range manifest.Contracts {
 		if contract.Kind == "step" {
 			continue // skip; step contracts loaded separately
+		}
+		if contract.Kind == "service_method" {
+			continue // skip; service method contracts tracked separately
 		}
 		if contract.Kind != "module" {
 			t.Fatalf("unexpected contract kind %q in plugin.contracts.json", contract.Kind)

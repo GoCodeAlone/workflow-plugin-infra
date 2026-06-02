@@ -1,0 +1,14 @@
+modules:
+  - name: infra-admin
+    type: infra.admin
+    config:
+      api_base_path: "/api/infra"
+      prefix: "/admin/infra"
+
+  - name: infra-admin-static
+    type: static.fileserver
+    config:
+      root: "./ui_dist"
+      prefix: "/admin/infra"
+      spa: true
+    dependsOn: [router]

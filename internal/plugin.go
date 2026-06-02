@@ -1,11 +1,14 @@
 // Package internal implements the workflow-plugin-infra external plugin,
-// providing abstract infra.* module types that delegate to an IaC provider.
+// providing abstract infra.* module types that delegate to an IaC provider,
+// plus the infra.admin module type that serves the infrastructure management SPA.
 package internal
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 
 	"github.com/GoCodeAlone/workflow-plugin-infra/internal/contracts"
 	pb "github.com/GoCodeAlone/workflow/plugin/external/proto"
@@ -16,6 +19,7 @@ import (
 	"google.golang.org/protobuf/types/descriptorpb"
 	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/structpb"
+	"gopkg.in/yaml.v3"
 )
 
 // Version is set at build time via -ldflags
@@ -51,7 +55,11 @@ var infraTypes = moduleTypesFromDefinitions(infraModuleDefinitions)
 
 var infraContractRegistry = buildContractRegistry(infraModuleDefinitions)
 
-// infraPlugin implements sdk.PluginProvider, sdk.TypedModuleProvider, and sdk.ContractProvider.
+// infraAdminModuleType is the module type name for the SPA admin contribution.
+const infraAdminModuleType = "infra.admin"
+
+// infraPlugin implements sdk.PluginProvider, sdk.TypedModuleProvider, sdk.ContractProvider,
+// and sdk.ConfigProvider.
 type infraPlugin struct{}
 
 // NewInfraPlugin returns a new infraPlugin instance.
@@ -71,11 +79,14 @@ func (p *infraPlugin) Manifest() sdk.PluginManifest {
 
 // ModuleTypes returns the module type names this plugin provides.
 func (p *infraPlugin) ModuleTypes() []string {
-	return append([]string(nil), infraTypes...)
+	return append(append([]string(nil), infraTypes...), infraAdminModuleType)
 }
 
 // CreateModule creates a module instance of the given type.
 func (p *infraPlugin) CreateModule(typeName, name string, config map[string]any) (sdk.ModuleInstance, error) {
+	if typeName == infraAdminModuleType {
+		return newInfraAdminModule(name, config), nil
+	}
 	for _, t := range infraTypes {
 		if t == typeName {
 			return &infraModule{name: name, infraType: typeName, config: config}, nil
@@ -91,6 +102,30 @@ func (p *infraPlugin) TypedModuleTypes() []string {
 
 // CreateTypedModule creates a typed module instance of the given type.
 func (p *infraPlugin) CreateTypedModule(typeName, name string, config *anypb.Any) (sdk.ModuleInstance, error) {
+	if typeName == infraAdminModuleType {
+		factory := sdk.NewTypedModuleFactory(typeName, &contracts.InfraAdminConfig{}, func(name string, cfg *contracts.InfraAdminConfig) (sdk.ModuleInstance, error) {
+			c := map[string]any{
+				"api_base_path": cfg.GetApiBasePath(),
+				"prefix":        cfg.GetPrefix(),
+			}
+			if a := cfg.GetAdmin(); a != nil {
+				admin := map[string]any{
+					"enabled":     a.GetEnabled(),
+					"module":      a.GetModule(),
+					"id":          a.GetId(),
+					"title":       a.GetTitle(),
+					"category":    a.GetCategory(),
+					"path":        a.GetPath(),
+					"render_mode": a.GetRenderMode(),
+					"app_context": a.GetAppContext(),
+					"permissions": a.GetPermissions(),
+				}
+				c["admin"] = admin
+			}
+			return newInfraAdminModule(name, c), nil
+		})
+		return factory.CreateTypedModule(typeName, name, config)
+	}
 	for _, definition := range infraModuleDefinitions {
 		if definition.typeName == typeName {
 			return definition.createTyped(typeName, name, config)
@@ -154,10 +189,27 @@ func (p *infraPlugin) ContractRegistry() *pb.ContractRegistry {
 }
 
 func buildContractRegistry(definitions []infraModuleDefinition) *pb.ContractRegistry {
-	descriptors := make([]*pb.ContractDescriptor, 0, len(definitions))
+	descriptors := make([]*pb.ContractDescriptor, 0, len(definitions)+2)
 	for _, definition := range definitions {
 		descriptors = append(descriptors, moduleContract(definition.typeName, definition.configMessage))
 	}
+	// infra.admin module contract (typed config via InfraAdminConfig proto).
+	descriptors = append(descriptors, &pb.ContractDescriptor{
+		Kind:          pb.ContractKind_CONTRACT_KIND_MODULE,
+		ModuleType:    infraAdminModuleType,
+		ConfigMessage: "workflow.plugins.infra.admin.v1.InfraAdminConfig",
+		Mode:          pb.ContractMode_CONTRACT_MODE_STRICT_PROTO,
+	})
+	// infra.admin service method: AdminContribution (matches authz-ui pattern).
+	descriptors = append(descriptors, &pb.ContractDescriptor{
+		Kind:          pb.ContractKind_CONTRACT_KIND_SERVICE,
+		ModuleType:    infraAdminModuleType,
+		ServiceName:   "InfraAdmin",
+		Method:        "AdminContribution",
+		InputMessage:  "workflow.plugins.infra.admin.v1.GetAdminContributionInput",
+		OutputMessage: "workflow.plugins.infra.admin.v1.GetAdminContributionOutput",
+		Mode:          pb.ContractMode_CONTRACT_MODE_STRICT_PROTO,
+	})
 	// No step contracts post-Phase-3b: infra.dns_record removed (peer-dispatch
 	// from step-handler context infeasible; per-record workflows route through
 	// wfctl infra apply or wfctl dns-policy * instead).
@@ -166,10 +218,55 @@ func buildContractRegistry(definitions []infraModuleDefinition) *pb.ContractRegi
 			File: []*descriptorpb.FileDescriptorProto{
 				protodesc.ToFileDescriptorProto(structpb.File_google_protobuf_struct_proto),
 				protodesc.ToFileDescriptorProto(contracts.File_internal_contracts_infra_proto),
+				protodesc.ToFileDescriptorProto(contracts.File_internal_contracts_infra_admin_proto),
 			},
 		},
 		Contracts: descriptors,
 	}
+}
+
+// ConfigFragment implements sdk.ConfigProvider. It extracts the embedded SPA
+// assets and returns a config fragment that wires a static.fileserver module
+// to serve the infra admin SPA at /admin/infra.
+//
+// ASSUMPTION: the plugin process's working directory when ConfigFragment is
+// called (and at runtime) must be the plugin install root — the same directory
+// extractAssets() writes ui_dist/ into. If the engine changes cwd between
+// ConfigFragment and module startup, the static.fileserver root will 404.
+// This is the same assumption as workflow-plugin-authz-ui.
+func (p *infraPlugin) ConfigFragment() ([]byte, error) {
+	if err := extractAssets(); err != nil {
+		return nil, fmt.Errorf("infra plugin: extract assets: %w", err)
+	}
+
+	dir, err := os.Getwd()
+	if err != nil {
+		return nil, fmt.Errorf("infra plugin: get working directory: %w", err)
+	}
+
+	absUIPath := filepath.Join(dir, "ui_dist")
+
+	var cfg map[string]any
+	if err := yaml.Unmarshal(configData, &cfg); err != nil {
+		return nil, fmt.Errorf("infra plugin: parse config: %w", err)
+	}
+
+	if modules, ok := cfg["modules"].([]any); ok {
+		for _, m := range modules {
+			mod, ok := m.(map[string]any)
+			if !ok {
+				continue
+			}
+			modType, _ := mod["type"].(string)
+			if modType == "static.fileserver" {
+				if config, ok := mod["config"].(map[string]any); ok {
+					config["root"] = absUIPath
+				}
+			}
+		}
+	}
+
+	return yaml.Marshal(cfg)
 }
 
 func moduleTypesFromDefinitions(definitions []infraModuleDefinition) []string {

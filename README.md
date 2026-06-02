@@ -2,6 +2,10 @@
 
 > ⚠️ **Experimental** — This plugin compiles and passes its unit tests but has not been validated in any active GoCodeAlone-internal production deployment. Use with caution. Please [open an issue](https://github.com/GoCodeAlone/workflow-plugin-infra/issues/new) if you adopt it so we can promote it to **verified** status.
 
+## Release note — `minEngineVersion`
+
+`plugin.json` declares `"minEngineVersion": "0.70.0"` — the workflow release that ships the `step.iac_provider_*` step types + the `iac.provider` service-registration this plugin's admin surface depends on at runtime. The go.mod is pinned to `github.com/GoCodeAlone/workflow v0.70.0` to match.
+
 ## What this plugin provides
 
 Abstract `infra.*` module types (13 total: `container_service`, `k8s_cluster`, `database`, `cache`, `vpc`, `load_balancer`, `dns`, `registry`, `api_gateway`, `firewall`, `iam_role`, `storage`, `certificate`) with `IaCProvider` delegation. The plugin itself defines no provider-specific behavior — module instances are resolved against the host's configured IaC provider (e.g. workflow-plugin-digitalocean, workflow-plugin-cloudflare).
