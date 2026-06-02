@@ -4,7 +4,7 @@
 
 ## Release note — `minEngineVersion`
 
-`plugin.json` currently declares `"minEngineVersion": "0.70.0"`. This value is **provisional**. Update it to the actual workflow release that ships the `step.iac_provider_*` step types at plugin-release time.
+`plugin.json` declares `"minEngineVersion": "0.70.0"` — the workflow release that ships the `step.iac_provider_*` step types + the `iac.provider` service-registration this plugin's admin surface depends on at runtime. The go.mod is pinned to `github.com/GoCodeAlone/workflow v0.70.0` to match.
 
 ## What this plugin provides
 
