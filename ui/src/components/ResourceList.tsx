@@ -41,7 +41,7 @@ export default function ResourceList({ onSpecsChange, onProviderChange }: Resour
   }, [provider, onProviderChange])
 
   function addSpec() {
-    if (!editName.trim()) return
+    if (!editName.trim() || !editRegion || !editType) return
     const spec: ResourceSpec = {
       name: editName.trim(),
       type: editType,
@@ -170,7 +170,7 @@ export default function ResourceList({ onSpecsChange, onProviderChange }: Resour
           <button
             className="btn btn-primary"
             onClick={addSpec}
-            disabled={!editName.trim() || types.length === 0}
+            disabled={!editName.trim() || regions.length === 0 || types.length === 0 || !editRegion || !editType}
           >
             Add
           </button>
