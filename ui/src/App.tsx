@@ -5,13 +5,12 @@ import Layout from './components/Layout'
 import PlanPreview from './components/PlanPreview'
 import ResourceList from './components/ResourceList'
 import SecretsPanel from './components/SecretsPanel'
-import type { PlanResult, ResourceSpec, Tab } from './types'
+import type { ResourceSpec, Tab } from './types'
 
 export default function App() {
   const [tab, setTab] = useState<Tab>('resources')
   const [specs, setSpecs] = useState<ResourceSpec[]>([])
   const [provider, setProvider] = useState('digitalocean')
-  const [_plan, setPlan] = useState<PlanResult | null>(null)
 
   return (
     <Layout tab={tab} onTabChange={setTab}>
@@ -25,7 +24,6 @@ export default function App() {
         <PlanPreview
           provider={provider}
           specs={specs}
-          onPlanReady={setPlan}
         />
       )}
       {tab === 'commit' && <CommitPR specs={specs} />}
