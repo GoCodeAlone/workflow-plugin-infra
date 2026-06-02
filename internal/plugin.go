@@ -228,6 +228,12 @@ func buildContractRegistry(definitions []infraModuleDefinition) *pb.ContractRegi
 // ConfigFragment implements sdk.ConfigProvider. It extracts the embedded SPA
 // assets and returns a config fragment that wires a static.fileserver module
 // to serve the infra admin SPA at /admin/infra.
+//
+// ASSUMPTION: the plugin process's working directory when ConfigFragment is
+// called (and at runtime) must be the plugin install root — the same directory
+// extractAssets() writes ui_dist/ into. If the engine changes cwd between
+// ConfigFragment and module startup, the static.fileserver root will 404.
+// This is the same assumption as workflow-plugin-authz-ui.
 func (p *infraPlugin) ConfigFragment() ([]byte, error) {
 	if err := extractAssets(); err != nil {
 		return nil, fmt.Errorf("infra plugin: extract assets: %w", err)
