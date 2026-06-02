@@ -11,7 +11,7 @@ build: ui
 	$(GO_ENV) go build $(LDFLAGS) -o bin/$(BINARY_NAME) ./cmd/$(BINARY_NAME)
 
 ui:
-	cd ui && npm ci && npx vite build
+	cd ui && npm ci && npm run build
 	rm -rf internal/ui_dist && cp -r ui/dist internal/ui_dist
 
 test: _ensure_ui_dist

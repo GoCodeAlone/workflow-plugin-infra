@@ -4,7 +4,7 @@ before:
   hooks:
     - go mod tidy
     - "sed -i.bak -e 's/\"version\": \".*\"/\"version\": \"{{ .Version }}\"/' -e 's#/releases/download/v[^/]*/#/releases/download/v{{ .Version }}/#g' -e 's/workflow-plugin-infra_[0-9][0-9A-Za-z.~-]*/workflow-plugin-infra_{{ .Version }}/g' plugin.json && rm -f plugin.json.bak"
-    - "bash -c 'cd ui && npm ci && npx vite build && rm -rf ../internal/ui_dist && cp -r dist ../internal/ui_dist'"
+    - "bash -c 'cd ui && npm ci && npm run build && rm -rf ../internal/ui_dist && cp -r dist ../internal/ui_dist'"
 builds:
   - id: workflow-plugin-infra
     main: ./cmd/workflow-plugin-infra
