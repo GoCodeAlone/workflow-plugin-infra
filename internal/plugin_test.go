@@ -327,6 +327,123 @@ func TestInfraAdminModuleUnsupportedMethod(t *testing.T) {
 	}
 }
 
+// TestCreateTypedModule_InfraAdmin_AdminContribution exercises the typed-factory
+// path for infra.admin: struct→map translation in CreateTypedModule and the
+// InvokeMethod("AdminContribution") return value, including:
+//   - fully-populated InfraAdminConfig (custom path, title, permissions)
+//   - nil GetAdmin() (omitted sub-message) falls back to defaults
+func TestCreateTypedModule_InfraAdmin_AdminContribution(t *testing.T) {
+	provider := NewInfraPlugin().(sdk.TypedModuleProvider)
+
+	type serviceInvoker interface {
+		InvokeMethod(method string, input map[string]any) (map[string]any, error)
+	}
+
+	t.Run("fully_populated", func(t *testing.T) {
+		cfg := &contracts.InfraAdminConfig{
+			ApiBasePath: "/api/infra",
+			Prefix:      "/admin/infra",
+			Admin: &contracts.InfraAdminContributionConfig{
+				Enabled:     true,
+				Id:          "my-infra",
+				Title:       "My Infra",
+				Category:    "platform",
+				Path:        "/admin/my-infra",
+				RenderMode:  "iframe",
+				AppContext:  "app",
+				Permissions: []string{"infra:read", "infra:apply"},
+			},
+		}
+		packed, err := anypb.New(cfg)
+		if err != nil {
+			t.Fatalf("anypb.New: %v", err)
+		}
+		mod, err := provider.CreateTypedModule("infra.admin", "test-admin", packed)
+		if err != nil {
+			t.Fatalf("CreateTypedModule: %v", err)
+		}
+		invoker, ok := mod.(serviceInvoker)
+		if !ok {
+			t.Fatalf("module type %T does not implement InvokeMethod", mod)
+		}
+		out, err := invoker.InvokeMethod("AdminContribution", nil)
+		if err != nil {
+			t.Fatalf("InvokeMethod: %v", err)
+		}
+		if got, _ := out["enabled"].(bool); !got {
+			t.Errorf("enabled = %v, want true", out["enabled"])
+		}
+		contribution, ok := out["contribution"].(map[string]any)
+		if !ok {
+			t.Fatalf("contribution type = %T, want map[string]any", out["contribution"])
+		}
+		checks := map[string]string{
+			"id":          "my-infra",
+			"title":       "My Infra",
+			"category":    "platform",
+			"path":        "/admin/my-infra",
+			"render_mode": "iframe",
+		}
+		for field, want := range checks {
+			if got, _ := contribution[field].(string); got != want {
+				t.Errorf("contribution[%q] = %q, want %q", field, got, want)
+			}
+		}
+		perms := strSliceVal(contribution["permissions"])
+		if len(perms) != 2 || perms[0] != "infra:read" {
+			t.Errorf("permissions = %v, want [infra:read infra:apply]", perms)
+		}
+	})
+
+	t.Run("nil_admin_uses_defaults", func(t *testing.T) {
+		// InfraAdminConfig with no Admin sub-message: GetAdmin() returns nil.
+		// CreateTypedModule must skip the admin map and let adminContributionFromConfig
+		// fall back to its built-in defaults.
+		cfg := &contracts.InfraAdminConfig{
+			ApiBasePath: "/api/infra",
+			Prefix:      "/admin/infra",
+			// Admin intentionally omitted
+		}
+		packed, err := anypb.New(cfg)
+		if err != nil {
+			t.Fatalf("anypb.New: %v", err)
+		}
+		mod, err := provider.CreateTypedModule("infra.admin", "test-admin-defaults", packed)
+		if err != nil {
+			t.Fatalf("CreateTypedModule: %v", err)
+		}
+		invoker := mod.(serviceInvoker)
+		out, err := invoker.InvokeMethod("AdminContribution", nil)
+		if err != nil {
+			t.Fatalf("InvokeMethod: %v", err)
+		}
+		if got, _ := out["enabled"].(bool); !got {
+			t.Errorf("enabled = %v, want true (default)", out["enabled"])
+		}
+		contribution, ok := out["contribution"].(map[string]any)
+		if !ok {
+			t.Fatalf("contribution type = %T, want map[string]any", out["contribution"])
+		}
+		// Defaults from adminContributionFromConfig
+		defaults := map[string]string{
+			"id":          "infra-resources",
+			"title":       "Infrastructure",
+			"category":    "operations",
+			"path":        "/admin/infra", // falls back to Prefix
+			"render_mode": "iframe",
+		}
+		for field, want := range defaults {
+			if got, _ := contribution[field].(string); got != want {
+				t.Errorf("default contribution[%q] = %q, want %q", field, got, want)
+			}
+		}
+		perms := strSliceVal(contribution["permissions"])
+		if len(perms) == 0 {
+			t.Error("default permissions should be non-empty")
+		}
+	})
+}
+
 type manifestContract struct {
 	Mode          string `json:"mode"`
 	ConfigMessage string `json:"config"`
