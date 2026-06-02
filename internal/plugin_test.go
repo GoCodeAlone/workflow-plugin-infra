@@ -194,7 +194,9 @@ func TestContractRegistry_HasNoStepContractsPostPhase3b(t *testing.T) {
 	}
 }
 
-// TestPluginImplementsConfigProvider verifies that the plugin implements sdk.ConfigProvider.
+// TestPluginImplementsConfigProvider verifies that the plugin implements sdk.ConfigProvider
+// and that ConfigFragment() succeeds and returns valid YAML. The ui_dist assets are embedded
+// at compile time so this must work in all test environments.
 func TestPluginImplementsConfigProvider(t *testing.T) {
 	p := NewInfraPlugin()
 	cp, ok := p.(sdk.ConfigProvider)
@@ -203,8 +205,7 @@ func TestPluginImplementsConfigProvider(t *testing.T) {
 	}
 	fragment, err := cp.ConfigFragment()
 	if err != nil {
-		t.Logf("ConfigFragment returned error (expected in test env without full ui_dist): %v", err)
-		return
+		t.Fatalf("ConfigFragment returned unexpected error: %v", err)
 	}
 	if len(fragment) == 0 {
 		t.Error("ConfigFragment returned empty byte slice")
@@ -296,7 +297,6 @@ func TestInfraAdminModuleReturnsAdminContribution(t *testing.T) {
 	}
 
 	// Verify infra.admin is in ModuleTypes.
-	p := NewInfraPlugin()
 	found := false
 	for _, mt := range mp.(interface{ ModuleTypes() []string }).ModuleTypes() {
 		if mt == "infra.admin" {
@@ -304,7 +304,6 @@ func TestInfraAdminModuleReturnsAdminContribution(t *testing.T) {
 			break
 		}
 	}
-	_ = p
 	if !found {
 		t.Error("infra.admin not in plugin.ModuleTypes()")
 	}
