@@ -43,7 +43,7 @@
         }
     ],
     "capabilities": {
-        "configProvider": false,
+        "configProvider": true,
         "moduleTypes": [
             "infra.container_service",
             "infra.k8s_cluster",
@@ -57,7 +57,8 @@
             "infra.firewall",
             "infra.iam_role",
             "infra.storage",
-            "infra.certificate"
+            "infra.certificate",
+            "infra.admin"
         ],
         "stepTypes": [],
         "cliCommands": [],

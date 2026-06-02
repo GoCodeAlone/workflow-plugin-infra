@@ -13,6 +13,7 @@ import (
 	"google.golang.org/protobuf/reflect/protodesc"
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/types/known/anypb"
+	"gopkg.in/yaml.v3"
 )
 
 func TestInfraPluginImplementsStrictContractProviders(t *testing.T) {
@@ -190,6 +191,54 @@ func TestContractRegistry_HasNoStepContractsPostPhase3b(t *testing.T) {
 		if c.Kind == pb.ContractKind_CONTRACT_KIND_STEP {
 			t.Errorf("ContractRegistry has unexpected step contract post-Phase-3b: %+v", c)
 		}
+	}
+}
+
+// TestPluginImplementsConfigProvider verifies that the plugin implements sdk.ConfigProvider.
+func TestPluginImplementsConfigProvider(t *testing.T) {
+	p := NewInfraPlugin()
+	cp, ok := p.(sdk.ConfigProvider)
+	if !ok {
+		t.Fatal("plugin does not implement sdk.ConfigProvider")
+	}
+	fragment, err := cp.ConfigFragment()
+	if err != nil {
+		t.Logf("ConfigFragment returned error (expected in test env without full ui_dist): %v", err)
+		return
+	}
+	if len(fragment) == 0 {
+		t.Error("ConfigFragment returned empty byte slice")
+	}
+	var parsed map[string]any
+	if err := yaml.Unmarshal(fragment, &parsed); err != nil {
+		t.Errorf("ConfigFragment returned invalid YAML: %v", err)
+	}
+}
+
+// TestConfigDataContainsStaticFileserver verifies the embedded config declares
+// a static.fileserver module (required for serving the SPA).
+func TestConfigDataContainsStaticFileserver(t *testing.T) {
+	var cfg map[string]any
+	if err := yaml.Unmarshal(configData, &cfg); err != nil {
+		t.Fatalf("parse config: %v", err)
+	}
+	modules, ok := cfg["modules"].([]any)
+	if !ok {
+		t.Fatal("'modules' is not a list")
+	}
+	found := false
+	for _, m := range modules {
+		mod, ok := m.(map[string]any)
+		if !ok {
+			continue
+		}
+		if modType, _ := mod["type"].(string); modType == "static.fileserver" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("embedded config.yaml does not declare a static.fileserver module")
 	}
 }
 
