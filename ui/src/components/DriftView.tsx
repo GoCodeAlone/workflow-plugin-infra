@@ -25,6 +25,10 @@ export default function DriftView({ provider }: DriftViewProps) {
   }
 
   useEffect(() => {
+    // Clear stale reconcile state so a ref/warning from the previous provider
+    // isn't shown against the new provider's drift table.
+    setReconcileResult(null)
+    setReconcileError(null)
     load()
   }, [provider]) // eslint-disable-line react-hooks/exhaustive-deps
 

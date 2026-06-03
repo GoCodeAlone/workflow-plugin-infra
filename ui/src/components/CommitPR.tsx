@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { commitSpecs } from '../api'
 import type { CommitResult, ResourceSpec } from '../types'
 
@@ -12,13 +12,16 @@ export default function CommitPR({ specs }: CommitPRProps) {
   const [result, setResult] = useState<CommitResult | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // Synchronous in-flight latch: `loading` is async React state, so a fast
+  // double-click can re-enter doCommit before the re-render. The ref guarantees
+  // at-most-one in-flight commit.
+  const commitInFlight = useRef(false)
 
   // Shared commit path used by both the initial submit and the idempotent
-  // retry-commit-back action. The `loading` guard is shared, so a second
-  // invocation (e.g. double-click, or retry while a commit is in flight)
-  // short-circuits before issuing a concurrent request.
+  // retry-commit-back action.
   async function doCommit() {
-    if (loading || !branch.trim() || specs.length === 0) return
+    if (commitInFlight.current || !branch.trim() || specs.length === 0) return
+    commitInFlight.current = true
     setLoading(true)
     setError(null)
     setResult(null)
@@ -29,6 +32,7 @@ export default function CommitPR({ specs }: CommitPRProps) {
       setError(String(err))
     } finally {
       setLoading(false)
+      commitInFlight.current = false
     }
   }
 
