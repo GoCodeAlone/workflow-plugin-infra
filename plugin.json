@@ -6,7 +6,7 @@
     "license": "MIT",
     "type": "external",
     "tier": "community",
-    "minEngineVersion": "0.70.0",
+    "minEngineVersion": "0.72.0",
     "keywords": ["infra", "iac", "infrastructure", "kubernetes", "database", "vpc", "dns"],
     "homepage": "https://github.com/GoCodeAlone/workflow-plugin-infra",
     "repository": "https://github.com/GoCodeAlone/workflow-plugin-infra",

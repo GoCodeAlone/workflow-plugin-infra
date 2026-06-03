@@ -513,3 +513,108 @@ code {
   border-radius: 3px;
   padding: 1px 5px;
 }
+
+/* ── Secondary button ──────────────────────────────────────────── */
+.btn-secondary {
+  background: var(--bg-surface2);
+  color: var(--text);
+  border: 1px solid var(--border);
+}
+
+.btn-secondary:hover:not(:disabled) {
+  background: var(--border);
+}
+
+/* ── Warning button ────────────────────────────────────────────── */
+.btn-warning {
+  background: var(--warning-bg);
+  color: var(--warning);
+  border: 1px solid var(--warning);
+}
+
+.btn-warning:hover:not(:disabled) {
+  filter: brightness(0.95);
+}
+
+/* ── Inline link button (semantic link, styled as text) ─────────── */
+.btn-inline-link {
+  background: none;
+  border: none;
+  color: var(--accent);
+  cursor: pointer;
+  font-family: var(--font);
+  font-size: inherit;
+  padding: 0;
+  text-decoration: underline;
+}
+
+.btn-inline-link:hover {
+  color: var(--accent-hover);
+}
+
+/* ── State-diverged banner ─────────────────────────────────────── */
+.state-diverged-banner {
+  background: var(--warning-bg);
+  border: 1px solid var(--warning);
+  border-radius: var(--radius);
+  color: var(--warning);
+  font-size: 13px;
+  margin-top: 12px;
+  padding: 10px 14px;
+  line-height: 1.6;
+}
+
+.state-diverged-actions {
+  margin-top: 10px;
+}
+
+.state-diverged-branch {
+  margin-top: 6px;
+  font-size: 12px;
+}
+
+/* ── Deadline exceeded banner ──────────────────────────────────── */
+.deadline-banner {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  font-size: 13px;
+  margin-top: 12px;
+  padding: 10px 14px;
+  line-height: 1.6;
+}
+
+/* ── Reconcile result ──────────────────────────────────────────── */
+.reconcile-result {
+  margin-top: 16px;
+  padding: 12px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 13px;
+}
+
+.reconcile-result p {
+  margin-top: 8px;
+}
+
+.reconcile-result a {
+  color: var(--accent);
+}
+
+.reconcile-warning {
+  background: var(--warning-bg);
+  border: 1px solid var(--warning);
+  border-radius: var(--radius);
+  color: var(--warning);
+  font-size: 13px;
+  padding: 8px 12px;
+  margin-bottom: 8px;
+  line-height: 1.5;
+}
+
+.reconcile-count {
+  color: var(--text-muted);
+  font-size: 12px;
+}
