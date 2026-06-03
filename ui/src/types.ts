@@ -31,6 +31,12 @@ export interface ResourceSpec {
   [key: string]: unknown
 }
 
+// ── Exec Environments ─────────────────────────────────────────────────────────
+
+export interface ExecEnvs {
+  exec_envs: string[]
+}
+
 // ── Plan / Apply ──────────────────────────────────────────────────────────────
 
 export interface PlanAction {
@@ -50,6 +56,10 @@ export interface PlanResult {
 export interface ApplyResult {
   applied: boolean
   result: unknown
+  /** HTTP 207: state diverged — commit-back incomplete, retry required */
+  state_diverged?: boolean
+  /** Engine returned a deadline error — apply is still in flight (use GitOps path) */
+  deadline_exceeded?: boolean
 }
 
 // ── Commit / PR ───────────────────────────────────────────────────────────────
@@ -58,11 +68,23 @@ export interface CommitInput {
   specs: ResourceSpec[]
   branch: string
   message: string
+  exec_env?: string
 }
 
 export interface CommitResult {
   branch: string
   pr_url: string
+  /** HTTP 207: state diverged — commit-back requires retry */
+  state_diverged?: boolean
+}
+
+// ── Reconcile ─────────────────────────────────────────────────────────────────
+
+export interface ReconcileResult {
+  draft_pr_ref: string
+  pr_url?: string
+  /** Always present: reconcile output is approximate and must be reviewed before merge */
+  warning: string
 }
 
 // ── Drift ─────────────────────────────────────────────────────────────────────

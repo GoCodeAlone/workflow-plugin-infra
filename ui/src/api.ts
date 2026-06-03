@@ -3,8 +3,10 @@ import type {
   CommitInput,
   CommitResult,
   DriftResult,
+  ExecEnvs,
   PlanResult,
   ProviderCatalog,
+  ReconcileResult,
   Resource,
   ResourceSpec,
   SecretDeclareInput,
@@ -37,6 +39,12 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
     headers: body !== undefined ? { 'Content-Type': 'application/json' } : {},
     body: body !== undefined ? JSON.stringify(body) : undefined,
   })
+  // 207 Multi-Status is a partial-success: commit-back may have diverged.
+  // Parse the body so callers can inspect state_diverged rather than treating
+  // it as an error.
+  if (res.status === 207) {
+    return res.json() as Promise<T>
+  }
   if (!res.ok) {
     const text = await res.text()
     throw new Error(`${method} ${path} (${res.status}): ${text}`)
@@ -57,10 +65,20 @@ export function getProviderCatalog(provider: string): Promise<ProviderCatalog> {
   return request<ProviderCatalog>('GET', `/providers/${encodeURIComponent(provider)}/catalog`)
 }
 
+// ── Exec Environments ─────────────────────────────────────────────────────────
+
+export function getExecEnvs(): Promise<ExecEnvs> {
+  return request<ExecEnvs>('GET', '/exec-envs')
+}
+
 // ── Plan ──────────────────────────────────────────────────────────────────────
 
-export function planResources(provider: string, specs: ResourceSpec[]): Promise<PlanResult> {
-  return request<PlanResult>('POST', '/plan', { provider, specs })
+export function planResources(
+  provider: string,
+  specs: ResourceSpec[],
+  exec_env?: string,
+): Promise<PlanResult> {
+  return request<PlanResult>('POST', '/plan', { provider, specs, ...(exec_env ? { exec_env } : {}) })
 }
 
 // ── Apply ─────────────────────────────────────────────────────────────────────
@@ -69,14 +87,26 @@ export function applyResources(
   provider: string,
   specs: ResourceSpec[],
   desired_hash: string,
+  exec_env?: string,
 ): Promise<ApplyResult> {
-  return request<ApplyResult>('POST', '/apply', { provider, specs, desired_hash })
+  return request<ApplyResult>('POST', '/apply', {
+    provider,
+    specs,
+    desired_hash,
+    ...(exec_env ? { exec_env } : {}),
+  })
 }
 
 // ── Commit / PR ───────────────────────────────────────────────────────────────
 
 export function commitSpecs(input: CommitInput): Promise<CommitResult> {
   return request<CommitResult>('POST', '/commit', input)
+}
+
+// ── Reconcile ─────────────────────────────────────────────────────────────────
+
+export function reconcile(provider: string): Promise<ReconcileResult> {
+  return request<ReconcileResult>('POST', '/reconcile', { provider })
 }
 
 // ── Drift ─────────────────────────────────────────────────────────────────────

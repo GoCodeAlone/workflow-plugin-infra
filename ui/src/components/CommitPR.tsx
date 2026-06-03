@@ -28,6 +28,21 @@ export default function CommitPR({ specs }: CommitPRProps) {
     }
   }
 
+  /** Re-call the commit endpoint (idempotent) to retry a diverged commit-back. */
+  async function retryCommitBack() {
+    if (!branch.trim() || specs.length === 0) return
+    setLoading(true)
+    setError(null)
+    try {
+      const res = await commitSpecs({ specs, branch: branch.trim(), message: message.trim() })
+      setResult(res)
+    } catch (err: unknown) {
+      setError(String(err))
+    } finally {
+      setLoading(false)
+    }
+  }
+
   return (
     <section>
       <h2>Commit / PR</h2>
@@ -69,7 +84,7 @@ export default function CommitPR({ specs }: CommitPRProps) {
 
       {error && <p className="error">{error}</p>}
 
-      {result && (
+      {result && !result.state_diverged && (
         <div className="commit-result">
           <p>
             Branch: <code>{result.branch}</code>
@@ -83,6 +98,29 @@ export default function CommitPR({ specs }: CommitPRProps) {
             </p>
           ) : (
             <p className="notice">No PR URL returned.</p>
+          )}
+        </div>
+      )}
+
+      {/* 207 / state-diverged: commit-back was interrupted — show explicit retry action */}
+      {result?.state_diverged && (
+        <div className="state-diverged-banner" role="alert">
+          <strong>State diverged</strong> — the commit-back was interrupted before
+          completion. The operation is idempotent: retrying will reconcile the branch
+          without duplicating changes.
+          <div className="state-diverged-actions">
+            <button
+              className="btn btn-warning"
+              onClick={retryCommitBack}
+              disabled={loading || specs.length === 0}
+            >
+              {loading ? 'Retrying…' : 'Retry commit-back'}
+            </button>
+          </div>
+          {result.branch && (
+            <p className="state-diverged-branch">
+              Partial branch: <code>{result.branch}</code>
+            </p>
           )}
         </div>
       )}

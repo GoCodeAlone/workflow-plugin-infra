@@ -24,6 +24,7 @@ export default function App() {
         <PlanPreview
           provider={provider}
           specs={specs}
+          onRequestCommitTab={() => setTab('commit')}
         />
       )}
       {tab === 'commit' && <CommitPR specs={specs} />}
