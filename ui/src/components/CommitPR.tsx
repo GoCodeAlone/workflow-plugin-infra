@@ -13,26 +13,15 @@ export default function CommitPR({ specs }: CommitPRProps) {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  async function submit() {
-    if (!branch.trim() || specs.length === 0) return
+  // Shared commit path used by both the initial submit and the idempotent
+  // retry-commit-back action. The `loading` guard is shared, so a second
+  // invocation (e.g. double-click, or retry while a commit is in flight)
+  // short-circuits before issuing a concurrent request.
+  async function doCommit() {
+    if (loading || !branch.trim() || specs.length === 0) return
     setLoading(true)
     setError(null)
     setResult(null)
-    try {
-      const res = await commitSpecs({ specs, branch: branch.trim(), message: message.trim() })
-      setResult(res)
-    } catch (err: unknown) {
-      setError(String(err))
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  /** Re-call the commit endpoint (idempotent) to retry a diverged commit-back. */
-  async function retryCommitBack() {
-    if (!branch.trim() || specs.length === 0) return
-    setLoading(true)
-    setError(null)
     try {
       const res = await commitSpecs({ specs, branch: branch.trim(), message: message.trim() })
       setResult(res)
@@ -75,7 +64,7 @@ export default function CommitPR({ specs }: CommitPRProps) {
         </label>
         <button
           className="btn btn-primary"
-          onClick={submit}
+          onClick={doCommit}
           disabled={loading || !branch.trim() || specs.length === 0}
         >
           {loading ? 'Committing…' : 'Commit & Open PR'}
@@ -87,17 +76,18 @@ export default function CommitPR({ specs }: CommitPRProps) {
       {result && !result.state_diverged && (
         <div className="commit-result">
           <p>
-            Branch: <code>{result.branch}</code>
+            branch/PR ref: <code>{result.ref}</code>
           </p>
-          {result.pr_url ? (
+          {/^https?:\/\//.test(result.ref) && (
             <p>
-              PR:{' '}
-              <a href={result.pr_url} target="_blank" rel="noopener noreferrer">
-                {result.pr_url}
+              Open:{' '}
+              <a href={result.ref} target="_blank" rel="noopener noreferrer">
+                {result.ref}
               </a>
             </p>
-          ) : (
-            <p className="notice">No PR URL returned.</p>
+          )}
+          {!result.committed && (
+            <p className="notice">commit-back reported committed=false.</p>
           )}
         </div>
       )}
@@ -106,20 +96,20 @@ export default function CommitPR({ specs }: CommitPRProps) {
       {result?.state_diverged && (
         <div className="state-diverged-banner" role="alert">
           <strong>State diverged</strong> — the commit-back was interrupted before
-          completion. The operation is idempotent: retrying will reconcile the branch
-          without duplicating changes.
+          completion{result.reason ? ` (${result.reason})` : ''}. The operation is
+          idempotent: retrying will reconcile the branch without duplicating changes.
           <div className="state-diverged-actions">
             <button
               className="btn btn-warning"
-              onClick={retryCommitBack}
+              onClick={doCommit}
               disabled={loading || specs.length === 0}
             >
               {loading ? 'Retrying…' : 'Retry commit-back'}
             </button>
           </div>
-          {result.branch && (
+          {result.ref && (
             <p className="state-diverged-branch">
-              Partial branch: <code>{result.branch}</code>
+              Partial branch/PR ref: <code>{result.ref}</code>
             </p>
           )}
         </div>

@@ -613,3 +613,8 @@ code {
   margin-bottom: 8px;
   line-height: 1.5;
 }
+
+.reconcile-count {
+  color: var(--text-muted);
+  font-size: 12px;
+}

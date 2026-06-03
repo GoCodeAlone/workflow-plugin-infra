@@ -73,21 +73,25 @@ export default function DriftView({ provider }: DriftViewProps) {
       {reconcileResult && (
         <div className="reconcile-result" role="status">
           <div className="reconcile-warning" role="alert">
-            <strong>Review required before merge</strong> — reconcile produces an
-            approximate draft. Secret refs are not reconstructed. Inspect the diff
-            carefully before merging the PR.
+            <strong>Review required before merge</strong> —{' '}
+            {reconcileResult.warning ||
+              'reconcile produces an approximate draft; secret refs are not reconstructed.'}{' '}
+            Inspect the diff carefully before merging.
           </div>
           <p>
-            Draft PR ref: <code>{reconcileResult.draft_pr_ref}</code>
+            Draft PR ref: <code>{reconcileResult.ref}</code>
           </p>
-          {reconcileResult.pr_url && (
+          {/^https?:\/\//.test(reconcileResult.ref) && (
             <p>
-              PR:{' '}
-              <a href={reconcileResult.pr_url} target="_blank" rel="noopener noreferrer">
-                {reconcileResult.pr_url}
+              Open:{' '}
+              <a href={reconcileResult.ref} target="_blank" rel="noopener noreferrer">
+                {reconcileResult.ref}
               </a>
             </p>
           )}
+          <p className="reconcile-count">
+            {reconcileResult.count} change{reconcileResult.count !== 1 ? 's' : ''} drafted
+          </p>
         </div>
       )}
 

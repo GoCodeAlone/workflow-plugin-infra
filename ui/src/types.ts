@@ -53,12 +53,24 @@ export interface PlanResult {
   desired_hash: string
 }
 
+// The /apply route composes its response from multiple chained step outputs.
+// Fields originate from different steps (see api.ts contract block):
+//   - apply_result/desired_hash/provider/action_count → step.iac_provider_apply (raw)
+//   - committed/state_diverged                         → step.iac_commit_back (chained)
+//   - applied/deadline_exceeded                        → composed by the route
 export interface ApplyResult {
+  /** Composed by the route: true when the apply (and any commit-back) succeeded. */
   applied: boolean
-  result: unknown
-  /** HTTP 207: state diverged — commit-back incomplete, retry required */
+  /** Raw output of step.iac_provider_apply. */
+  apply_result?: unknown
+  desired_hash?: string
+  provider?: string
+  action_count?: number
+  /** From step.iac_commit_back: whether the commit-back committed. */
+  committed?: boolean
+  /** HTTP 207: state diverged — commit-back incomplete, retry required (from commit_back). */
   state_diverged?: boolean
-  /** Engine returned a deadline error — apply is still in flight (use GitOps path) */
+  /** Engine returned a deadline error — apply is still in flight (use GitOps path). */
   deadline_exceeded?: boolean
 }
 
@@ -68,23 +80,29 @@ export interface CommitInput {
   specs: ResourceSpec[]
   branch: string
   message: string
-  exec_env?: string
 }
 
+// Mirrors step.iac_commit_back output. `ref` is the branch name (branch-push
+// target) or the PR URL (gh-pr target) — one-or-the-other depending on config.
 export interface CommitResult {
-  branch: string
-  pr_url: string
-  /** HTTP 207: state diverged — commit-back requires retry */
+  committed: boolean
+  ref: string
+  /** HTTP 207: state diverged — commit-back requires retry. */
   state_diverged?: boolean
+  reason?: string
 }
 
 // ── Reconcile ─────────────────────────────────────────────────────────────────
 
+// Mirrors step.iac_provider_reconcile output. `ref` is the draft-PR branch/URL.
 export interface ReconcileResult {
-  draft_pr_ref: string
-  pr_url?: string
-  /** Always present: reconcile output is approximate and must be reviewed before merge */
+  draft: boolean
+  ref: string
+  /** Always present: reconcile output is approximate and must be reviewed before merge. */
   warning: string
+  count: number
+  state_diverged?: boolean
+  reason?: string
 }
 
 // ── Drift ─────────────────────────────────────────────────────────────────────

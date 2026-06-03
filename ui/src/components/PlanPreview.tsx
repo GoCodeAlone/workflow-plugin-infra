@@ -38,9 +38,12 @@ export default function PlanPreview({ provider, specs, onPlanReady, onRequestCom
           setExecEnv(envs[0])
         }
       })
-      .catch(() => {
+      .catch((err: unknown) => {
         // exec-envs endpoint may not be wired yet in older engine versions;
-        // treat gracefully — exec_env stays empty (engine uses default)
+        // treat gracefully — exec_env stays empty (engine uses default). Warn so a
+        // network/route-prefix misconfig is distinguishable from the legitimately
+        // -absent case (both fall through to the same graceful default).
+        console.warn('infra SPA: GET /exec-envs failed; falling back to default exec env', err)
         setExecEnvs([])
       })
       .finally(() => setExecEnvsLoading(false))
