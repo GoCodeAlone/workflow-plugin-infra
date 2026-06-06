@@ -1,6 +1,6 @@
 module github.com/GoCodeAlone/workflow-plugin-infra
 
-go 1.26.0
+go 1.26.4
 
 require (
 	github.com/GoCodeAlone/workflow v0.72.0
