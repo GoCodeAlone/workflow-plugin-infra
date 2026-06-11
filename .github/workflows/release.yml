@@ -91,4 +91,4 @@ jobs:
           repository: GoCodeAlone/workflow-registry
           event-type: plugin-release
           client-payload: |-
-            {"plugin": "infra", "tag": "${{ github.ref_name }}"}
+            {"plugin": "workflow-plugin-infra", "tag": "${{ github.ref_name }}"}
