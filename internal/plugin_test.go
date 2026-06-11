@@ -26,6 +26,26 @@ func TestInfraPluginImplementsStrictContractProviders(t *testing.T) {
 	}
 }
 
+func TestPluginManifestMinEngineVersionMatchesResourceDriverRequirement(t *testing.T) {
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	data, err := os.ReadFile(filepath.Join(filepath.Dir(file), "..", "plugin.json"))
+	if err != nil {
+		t.Fatalf("read plugin.json: %v", err)
+	}
+	var manifest struct {
+		MinEngineVersion string `json:"minEngineVersion"`
+	}
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		t.Fatalf("parse plugin.json: %v", err)
+	}
+	if manifest.MinEngineVersion != "0.74.0" {
+		t.Fatalf("minEngineVersion = %q, want 0.74.0 for providerclient.ResourceDriver apply/create support", manifest.MinEngineVersion)
+	}
+}
+
 func TestContractRegistryDeclaresStrictModuleContracts(t *testing.T) {
 	provider := NewInfraPlugin().(sdk.ContractProvider)
 	registry := provider.ContractRegistry()
