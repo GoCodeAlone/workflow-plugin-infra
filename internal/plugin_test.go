@@ -27,7 +27,11 @@ func TestInfraPluginImplementsStrictContractProviders(t *testing.T) {
 }
 
 func TestPluginManifestMinEngineVersionMatchesResourceDriverRequirement(t *testing.T) {
-	data, err := os.ReadFile(filepath.Join("..", "plugin.json"))
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	data, err := os.ReadFile(filepath.Join(filepath.Dir(file), "..", "plugin.json"))
 	if err != nil {
 		t.Fatalf("read plugin.json: %v", err)
 	}
