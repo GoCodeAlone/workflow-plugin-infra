@@ -16,7 +16,7 @@ func TestPluginBinary_Smoke(t *testing.T) {
 	if err == nil {
 		t.Errorf("expected non-zero exit on bare 'dns'")
 	}
-	if !strings.Contains(string(out), "usage") {
+	if !strings.Contains(string(out), "Usage") {
 		t.Errorf("usage missing: %s", out)
 	}
 }

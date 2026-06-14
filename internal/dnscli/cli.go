@@ -196,7 +196,13 @@ func parseCompileOptions(name string, args []string) (compileOptions, error) {
 	fs.StringVar(&opts.reportPath, "report", "reports/domain-reconcile-report.json", "Generated JSON report path")
 	fs.StringVar(&opts.bundlePath, "bundle", "", "Optional combined JSON bundle path")
 	fs.StringVar(&opts.stateDir, "state-dir", ".state/domain-intent/", "Filesystem state directory for generated iac.state")
-	return opts, fs.Parse(args)
+	if err := fs.Parse(args); err != nil {
+		return opts, err
+	}
+	if fs.NArg() > 0 {
+		return opts, fmt.Errorf("%s: unexpected positional argument(s): %s", name, strings.Join(fs.Args(), " "))
+	}
+	return opts, nil
 }
 
 func parseReconcileOptions(args []string) (reconcileOptions, error) {
@@ -214,7 +220,13 @@ func parseReconcileOptions(args []string) (reconcileOptions, error) {
 	fs.StringVar(&opts.mode, "mode", "plan", "Reconcile mode: plan or apply")
 	fs.BoolVar(&opts.autoApprove, "auto-approve", false, "Pass --auto-approve to infra apply (required with --mode apply)")
 	fs.BoolVar(&opts.allowEmpty, "allow-empty", false, "Allow intent with zero generated actions")
-	return opts, fs.Parse(args)
+	if err := fs.Parse(args); err != nil {
+		return opts, err
+	}
+	if fs.NArg() > 0 {
+		return opts, fmt.Errorf("dns intent reconcile: unexpected positional argument(s): %s", strings.Join(fs.Args(), " "))
+	}
+	return opts, nil
 }
 
 func compileDNSIntentBundle(opts compileOptions) (*intent.Bundle, error) {
@@ -264,9 +276,9 @@ func printSummary(bundle *intent.Bundle) {
 			for j := range domainReport.Actions {
 				actionTypes = append(actionTypes, domainReport.Actions[j].Type)
 			}
-			fmt.Printf("%s: %s\n", domainReport.Domain, strings.Join(actionTypes, ","))
+			fmt.Fprintf(os.Stderr, "%s: %s\n", domainReport.Domain, strings.Join(actionTypes, ","))
 		} else {
-			fmt.Printf("%s: blocked: %s\n", domainReport.Domain, strings.Join(domainReport.Blockers, "; "))
+			fmt.Fprintf(os.Stderr, "%s: blocked: %s\n", domainReport.Domain, strings.Join(domainReport.Blockers, "; "))
 		}
 	}
 }

@@ -2,9 +2,11 @@ package dnscli
 
 import (
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v3"
@@ -79,6 +81,13 @@ func TestRunDNSIntentReconcileApplyRequiresAutoApprove(t *testing.T) {
 	}
 }
 
+func TestRunDNSIntentReconcileRejectsUnexpectedArgs(t *testing.T) {
+	code := New().RunCLI([]string{"dns", "intent", "reconcile", "extra"})
+	if code == 0 {
+		t.Fatal("reconcile with unexpected positional args should fail")
+	}
+}
+
 func writeFile(t *testing.T, dir, name, body string) string {
 	t.Helper()
 	path := filepath.Join(dir, name)
@@ -86,6 +95,13 @@ func writeFile(t *testing.T, dir, name, body string) string {
 		t.Fatalf("write %s: %v", name, err)
 	}
 	return path
+}
+
+func TestRunCLIIntentCompileRejectsUnexpectedArgs(t *testing.T) {
+	code := New().RunCLI([]string{"dns", "intent", "compile", "extra"})
+	if code == 0 {
+		t.Fatal("compile with unexpected positional args should fail")
+	}
 }
 
 func TestRunCLIIntentCompileWritesConfigAndReport(t *testing.T) {
@@ -184,4 +200,72 @@ func TestRunCLIIntentCompileWritesConfigAndReport(t *testing.T) {
 	if report.Schema != "workflow.domain-intent.report.v1" || report.BlockedDomains != 0 || report.ActionCount != 1 {
 		t.Fatalf("bad report: %+v", report)
 	}
+}
+
+func TestRunCLIIntentCompileStdoutIsMachineReadableWhenOutputIsDash(t *testing.T) {
+	dir := t.TempDir()
+	intentPath := writeFile(t, dir, "domains.json", `{
+  "schema": "workflow.domain-intent.v1",
+  "domains": {
+    "example.com": {
+      "registrar": "hover",
+      "dns_host": "cloudflare",
+      "stage_dns": true,
+      "records_policy": "preserve_cloudflare"
+    }
+  }
+}`)
+	portfolioPath := writeFile(t, dir, "portfolio.json", `{
+  "schema": "workflow.dns-portfolio.export.v1",
+  "snapshots": [
+    {
+      "id": "cf-example-com",
+      "provider": "cloudflare",
+      "domain": "example.com",
+      "authority": {"name_servers": ["a.ns.cloudflare.com", "b.ns.cloudflare.com"]},
+      "records": [{"type": "A", "name": "@", "value": "192.0.2.10", "ttl": 300}]
+    }
+  ]
+}`)
+	reportPath := filepath.Join(dir, "report.json")
+
+	stdout := captureStdout(t, func() {
+		code := New().RunCLI([]string{"dns", "intent", "compile",
+			"--intent", intentPath,
+			"--portfolio", portfolioPath,
+			"--output", "-",
+			"--report", reportPath,
+		})
+		if code != 0 {
+			t.Fatalf("RunCLI compile to stdout exit = %d, want 0", code)
+		}
+	})
+	if strings.Contains(stdout, "example.com:") {
+		t.Fatalf("stdout contains human summary and would corrupt YAML:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "modules:") || !strings.Contains(stdout, "cf-example-com") {
+		t.Fatalf("stdout missing generated YAML:\n%s", stdout)
+	}
+}
+
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	oldStdout := os.Stdout
+	readPipe, writePipe, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	os.Stdout = writePipe
+	defer func() {
+		os.Stdout = oldStdout
+	}()
+	fn()
+	if err := writePipe.Close(); err != nil {
+		t.Fatalf("close stdout pipe: %v", err)
+	}
+	data, err := io.ReadAll(readPipe)
+	if err != nil {
+		t.Fatalf("read stdout: %v", err)
+	}
+	return string(data)
 }
