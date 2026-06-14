@@ -26,7 +26,7 @@ func TestInfraPluginImplementsStrictContractProviders(t *testing.T) {
 	}
 }
 
-func TestPluginManifestMinEngineVersionMatchesResourceDriverRequirement(t *testing.T) {
+func TestPluginManifestMinEngineVersionMatchesDNSNamespaceRequirement(t *testing.T) {
 	_, file, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("runtime.Caller failed")
@@ -41,9 +41,37 @@ func TestPluginManifestMinEngineVersionMatchesResourceDriverRequirement(t *testi
 	if err := json.Unmarshal(data, &manifest); err != nil {
 		t.Fatalf("parse plugin.json: %v", err)
 	}
-	if manifest.MinEngineVersion != "0.74.0" {
-		t.Fatalf("minEngineVersion = %q, want 0.74.0 for providerclient.ResourceDriver apply/create support", manifest.MinEngineVersion)
+	if manifest.MinEngineVersion != "0.80.14" {
+		t.Fatalf("minEngineVersion = %q, want 0.80.14 for plugin-owned dns command dispatch", manifest.MinEngineVersion)
 	}
+}
+
+func TestPluginManifestDeclaresDNSCLICommand(t *testing.T) {
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	data, err := os.ReadFile(filepath.Join(filepath.Dir(file), "..", "plugin.json"))
+	if err != nil {
+		t.Fatalf("read plugin.json: %v", err)
+	}
+	var manifest struct {
+		Capabilities struct {
+			CLICommands []struct {
+				Name        string `json:"name"`
+				Description string `json:"description"`
+			} `json:"cliCommands"`
+		} `json:"capabilities"`
+	}
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		t.Fatalf("parse plugin.json: %v", err)
+	}
+	for _, cmd := range manifest.Capabilities.CLICommands {
+		if cmd.Name == "dns" && cmd.Description != "" {
+			return
+		}
+	}
+	t.Fatalf("plugin.json must declare a non-empty dns CLI command, got %+v", manifest.Capabilities.CLICommands)
 }
 
 func TestContractRegistryDeclaresStrictModuleContracts(t *testing.T) {
