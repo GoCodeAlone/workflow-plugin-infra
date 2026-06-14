@@ -6,7 +6,7 @@
     "license": "MIT",
     "type": "external",
     "tier": "community",
-    "minEngineVersion": "0.74.0",
+    "minEngineVersion": "0.80.14",
     "keywords": ["infra", "iac", "infrastructure", "kubernetes", "database", "vpc", "dns"],
     "homepage": "https://github.com/GoCodeAlone/workflow-plugin-infra",
     "repository": "https://github.com/GoCodeAlone/workflow-plugin-infra",
@@ -61,7 +61,12 @@
             "infra.admin"
         ],
         "stepTypes": [],
-        "cliCommands": [],
+        "cliCommands": [
+            {
+                "name": "dns",
+                "description": "DNS intent orchestration helpers"
+            }
+        ],
         "triggerTypes": []
     }
 }
