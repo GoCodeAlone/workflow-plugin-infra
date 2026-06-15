@@ -62,16 +62,20 @@ jobs:
             checked=$((checked + 1))
             extract_dir="$(mktemp -d)"
             tar -xzf "$archive" -C "$extract_dir"
-            if [ ! -f "$extract_dir/plugin.json" ]; then
-              echo "::error title=Archive manifest missing::${archive} does not contain plugin.json"
+            mapfile -t archive_manifests < <(find "$extract_dir" -type f -name plugin.json)
+            mapfile -t archive_contract_files < <(find "$extract_dir" -type f -name plugin.contracts.json)
+            if [ "${#archive_manifests[@]}" -ne 1 ]; then
+              echo "::error title=Archive manifest mismatch::${archive} must contain exactly one plugin.json; found ${#archive_manifests[@]}"
+              find "$extract_dir" -maxdepth 3 -type f | sort
               exit 1
             fi
-            if [ ! -f "$extract_dir/plugin.contracts.json" ]; then
-              echo "::error title=Archive contracts missing::${archive} does not contain plugin.contracts.json"
+            if [ "${#archive_contract_files[@]}" -ne 1 ]; then
+              echo "::error title=Archive contracts mismatch::${archive} must contain exactly one plugin.contracts.json; found ${#archive_contract_files[@]}"
+              find "$extract_dir" -maxdepth 3 -type f | sort
               exit 1
             fi
-            archive_modules="$(jq -c '.capabilities.moduleTypes | sort' "$extract_dir/plugin.json")"
-            archive_contracts="$(jq -c '[.contracts[] | select(.kind == "module") | .type] | sort' "$extract_dir/plugin.contracts.json")"
+            archive_modules="$(jq -c '.capabilities.moduleTypes | sort' "${archive_manifests[0]}")"
+            archive_contracts="$(jq -c '[.contracts[] | select(.kind == "module") | .type] | sort' "${archive_contract_files[0]}")"
             if [ "$archive_modules" != "$source_modules" ]; then
               echo "::error title=Archive module capabilities drift::${archive} plugin.json moduleTypes do not match source plugin.json"
               diff -u <(printf '%s\n' "$source_modules" | jq -r '.[]') <(printf '%s\n' "$archive_modules" | jq -r '.[]') || true
