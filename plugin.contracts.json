@@ -45,6 +45,12 @@
     },
     {
       "kind": "module",
+      "type": "infra.http_redirect",
+      "mode": "strict",
+      "config": "workflow.plugins.infra.v1.HTTPRedirectConfig"
+    },
+    {
+      "kind": "module",
       "type": "infra.registry",
       "mode": "strict",
       "config": "workflow.plugins.infra.v1.RegistryConfig"

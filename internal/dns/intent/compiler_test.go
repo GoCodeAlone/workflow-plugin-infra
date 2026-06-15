@@ -87,6 +87,86 @@ func TestCompileDiscardParkedProducesCloudflareAndHoverResources(t *testing.T) {
 	}
 }
 
+func TestCompileForwardToProducesCloudflareRedirectResource(t *testing.T) {
+	dir := t.TempDir()
+	intentPath := writeTestFile(t, dir, "domains.json", `{
+  "schema": "workflow.domain-intent.v1",
+  "domains": {
+    "example.net": {
+      "registrar": "hover",
+      "dns_host": "cloudflare",
+      "records_policy": "discard_parked",
+      "forward_to": "http://example.com"
+    }
+  }
+}`)
+	portfolioPath := writeTestFile(t, dir, "portfolio.json", `{
+  "schema": "workflow.dns-portfolio.export.v1",
+  "snapshots": [
+    {
+      "id": "cf-example-net",
+      "provider": "cloudflare",
+      "domain": "example.net",
+      "authority": {"name_servers": ["ada.ns.cloudflare.com", "bob.ns.cloudflare.com"]},
+      "records": []
+    },
+    {
+      "id": "hover-example-net",
+      "provider": "hover",
+      "domain": "example.net",
+      "authority": {"registrar_nameservers": ["ada.ns.cloudflare.com", "bob.ns.cloudflare.com"]},
+      "records": [
+        {"type": "A", "name": "@", "value": "216.40.34.41", "ttl": 900},
+        {"type": "A", "name": "*", "value": "216.40.34.41", "ttl": 900},
+        {"type": "MX", "name": "@", "value": "10 mx.hover.com.cust.hostedemail.com", "ttl": 900},
+        {"type": "CNAME", "name": "mail", "value": "mail.hover.com.cust.hostedemail.com", "ttl": 900}
+      ]
+    }
+  ]
+}`)
+
+	bundle, err := Compile(Options{IntentPath: intentPath, PortfolioGlobs: []string{portfolioPath}})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	if bundle.Report.BlockedDomains != 0 {
+		t.Fatalf("blocked domains = %d; report=%+v", bundle.Report.BlockedDomains, bundle.Report)
+	}
+	if bundle.Report.ActionCount != 2 {
+		t.Fatalf("action count = %d, want stage_dns + configure_redirect", bundle.Report.ActionCount)
+	}
+	dns := moduleByName(bundle.Config.Modules, "cf-example-net")
+	if dns == nil {
+		t.Fatalf("missing cloudflare DNS module: %+v", bundle.Config.Modules)
+	}
+	records, ok := dns.Config["records"].([]map[string]any)
+	if !ok || len(records) != 1 {
+		t.Fatalf("dns records = %#v, want one originless placeholder", dns.Config["records"])
+	}
+	if records[0]["type"] != "A" || records[0]["name"] != "@" || records[0]["data"] != "192.0.2.1" || records[0]["proxied"] != true {
+		t.Fatalf("placeholder record = %#v", records[0])
+	}
+	redirect := moduleByName(bundle.Config.Modules, "cf-redirect-example-net")
+	if redirect == nil {
+		t.Fatalf("missing redirect module: %+v", bundle.Config.Modules)
+	}
+	if redirect.Type != "infra.http_redirect" {
+		t.Fatalf("redirect type = %q", redirect.Type)
+	}
+	if redirect.Config["provider"] != "cloudflare" {
+		t.Fatalf("provider = %#v", redirect.Config["provider"])
+	}
+	if redirect.Config["domain"] != "example.net" || redirect.Config["from_host"] != "example.net" {
+		t.Fatalf("redirect config = %#v", redirect.Config)
+	}
+	if redirect.Config["target_url"] != "http://example.com" {
+		t.Fatalf("target_url = %#v", redirect.Config["target_url"])
+	}
+	if redirect.Config["status_code"] != 301 {
+		t.Fatalf("status_code = %#v", redirect.Config["status_code"])
+	}
+}
+
 func TestCompileDiscardParkedBlocksNonParkedRecords(t *testing.T) {
 	dir := t.TempDir()
 	intentPath := writeTestFile(t, dir, "domains.json", `{

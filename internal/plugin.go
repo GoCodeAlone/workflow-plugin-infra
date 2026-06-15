@@ -42,6 +42,7 @@ var infraModuleDefinitions = []infraModuleDefinition{
 	typedInfraModuleDefinition("infra.vpc", "VPCConfig", &contracts.VPCConfig{}),
 	typedInfraModuleDefinition("infra.load_balancer", "LoadBalancerConfig", &contracts.LoadBalancerConfig{}),
 	typedInfraModuleDefinition("infra.dns", "DNSConfig", &contracts.DNSConfig{}),
+	typedInfraModuleDefinition("infra.http_redirect", "HTTPRedirectConfig", &contracts.HTTPRedirectConfig{}),
 	typedInfraModuleDefinition("infra.registry", "RegistryConfig", &contracts.RegistryConfig{}),
 	typedInfraModuleDefinition("infra.api_gateway", "APIGatewayConfig", &contracts.APIGatewayConfig{}),
 	typedInfraModuleDefinition("infra.firewall", "FirewallConfig", &contracts.FirewallConfig{}),

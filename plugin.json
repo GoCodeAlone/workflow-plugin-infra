@@ -1,7 +1,7 @@
 {
     "name": "workflow-plugin-infra",
     "version": "0.0.0",
-    "description": "Abstract infra.* module types (13 types) with IaCProvider delegation",
+    "description": "Abstract infra.* module types (14 types) with IaCProvider delegation",
     "author": "GoCodeAlone",
     "license": "MIT",
     "type": "external",
@@ -52,6 +52,7 @@
             "infra.vpc",
             "infra.load_balancer",
             "infra.dns",
+            "infra.http_redirect",
             "infra.registry",
             "infra.api_gateway",
             "infra.firewall",
