@@ -814,6 +814,138 @@ func (x *DNSConfig) GetSettings() *structpb.Struct {
 	return nil
 }
 
+type HTTPRedirectConfig struct {
+	state               protoimpl.MessageState `protogen:"open.v1"`
+	Provider            string                 `protobuf:"bytes,1,opt,name=provider,proto3" json:"provider,omitempty"`
+	Region              string                 `protobuf:"bytes,2,opt,name=region,proto3" json:"region,omitempty"`
+	Workspace           string                 `protobuf:"bytes,3,opt,name=workspace,proto3" json:"workspace,omitempty"`
+	Domain              string                 `protobuf:"bytes,4,opt,name=domain,proto3" json:"domain,omitempty"`
+	FromHost            string                 `protobuf:"bytes,5,opt,name=from_host,json=fromHost,proto3" json:"from_host,omitempty"`
+	TargetUrl           string                 `protobuf:"bytes,6,opt,name=target_url,json=targetUrl,proto3" json:"target_url,omitempty"`
+	StatusCode          int32                  `protobuf:"varint,7,opt,name=status_code,json=statusCode,proto3" json:"status_code,omitempty"`
+	PreservePath        bool                   `protobuf:"varint,8,opt,name=preserve_path,json=preservePath,proto3" json:"preserve_path,omitempty"`
+	PreserveQueryString bool                   `protobuf:"varint,9,opt,name=preserve_query_string,json=preserveQueryString,proto3" json:"preserve_query_string,omitempty"`
+	Enabled             bool                   `protobuf:"varint,10,opt,name=enabled,proto3" json:"enabled,omitempty"`
+	Labels              map[string]string      `protobuf:"bytes,11,rep,name=labels,proto3" json:"labels,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	Settings            *structpb.Struct       `protobuf:"bytes,12,opt,name=settings,proto3" json:"settings,omitempty"`
+	unknownFields       protoimpl.UnknownFields
+	sizeCache           protoimpl.SizeCache
+}
+
+func (x *HTTPRedirectConfig) Reset() {
+	*x = HTTPRedirectConfig{}
+	mi := &file_internal_contracts_infra_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *HTTPRedirectConfig) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*HTTPRedirectConfig) ProtoMessage() {}
+
+func (x *HTTPRedirectConfig) ProtoReflect() protoreflect.Message {
+	mi := &file_internal_contracts_infra_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use HTTPRedirectConfig.ProtoReflect.Descriptor instead.
+func (*HTTPRedirectConfig) Descriptor() ([]byte, []int) {
+	return file_internal_contracts_infra_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *HTTPRedirectConfig) GetProvider() string {
+	if x != nil {
+		return x.Provider
+	}
+	return ""
+}
+
+func (x *HTTPRedirectConfig) GetRegion() string {
+	if x != nil {
+		return x.Region
+	}
+	return ""
+}
+
+func (x *HTTPRedirectConfig) GetWorkspace() string {
+	if x != nil {
+		return x.Workspace
+	}
+	return ""
+}
+
+func (x *HTTPRedirectConfig) GetDomain() string {
+	if x != nil {
+		return x.Domain
+	}
+	return ""
+}
+
+func (x *HTTPRedirectConfig) GetFromHost() string {
+	if x != nil {
+		return x.FromHost
+	}
+	return ""
+}
+
+func (x *HTTPRedirectConfig) GetTargetUrl() string {
+	if x != nil {
+		return x.TargetUrl
+	}
+	return ""
+}
+
+func (x *HTTPRedirectConfig) GetStatusCode() int32 {
+	if x != nil {
+		return x.StatusCode
+	}
+	return 0
+}
+
+func (x *HTTPRedirectConfig) GetPreservePath() bool {
+	if x != nil {
+		return x.PreservePath
+	}
+	return false
+}
+
+func (x *HTTPRedirectConfig) GetPreserveQueryString() bool {
+	if x != nil {
+		return x.PreserveQueryString
+	}
+	return false
+}
+
+func (x *HTTPRedirectConfig) GetEnabled() bool {
+	if x != nil {
+		return x.Enabled
+	}
+	return false
+}
+
+func (x *HTTPRedirectConfig) GetLabels() map[string]string {
+	if x != nil {
+		return x.Labels
+	}
+	return nil
+}
+
+func (x *HTTPRedirectConfig) GetSettings() *structpb.Struct {
+	if x != nil {
+		return x.Settings
+	}
+	return nil
+}
+
 type RegistryConfig struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Provider      string                 `protobuf:"bytes,1,opt,name=provider,proto3" json:"provider,omitempty"`
@@ -829,7 +961,7 @@ type RegistryConfig struct {
 
 func (x *RegistryConfig) Reset() {
 	*x = RegistryConfig{}
-	mi := &file_internal_contracts_infra_proto_msgTypes[8]
+	mi := &file_internal_contracts_infra_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -841,7 +973,7 @@ func (x *RegistryConfig) String() string {
 func (*RegistryConfig) ProtoMessage() {}
 
 func (x *RegistryConfig) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_contracts_infra_proto_msgTypes[8]
+	mi := &file_internal_contracts_infra_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -854,7 +986,7 @@ func (x *RegistryConfig) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RegistryConfig.ProtoReflect.Descriptor instead.
 func (*RegistryConfig) Descriptor() ([]byte, []int) {
-	return file_internal_contracts_infra_proto_rawDescGZIP(), []int{8}
+	return file_internal_contracts_infra_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *RegistryConfig) GetProvider() string {
@@ -921,7 +1053,7 @@ type APIGatewayConfig struct {
 
 func (x *APIGatewayConfig) Reset() {
 	*x = APIGatewayConfig{}
-	mi := &file_internal_contracts_infra_proto_msgTypes[9]
+	mi := &file_internal_contracts_infra_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -933,7 +1065,7 @@ func (x *APIGatewayConfig) String() string {
 func (*APIGatewayConfig) ProtoMessage() {}
 
 func (x *APIGatewayConfig) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_contracts_infra_proto_msgTypes[9]
+	mi := &file_internal_contracts_infra_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -946,7 +1078,7 @@ func (x *APIGatewayConfig) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use APIGatewayConfig.ProtoReflect.Descriptor instead.
 func (*APIGatewayConfig) Descriptor() ([]byte, []int) {
-	return file_internal_contracts_infra_proto_rawDescGZIP(), []int{9}
+	return file_internal_contracts_infra_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *APIGatewayConfig) GetProvider() string {
@@ -1013,7 +1145,7 @@ type FirewallConfig struct {
 
 func (x *FirewallConfig) Reset() {
 	*x = FirewallConfig{}
-	mi := &file_internal_contracts_infra_proto_msgTypes[10]
+	mi := &file_internal_contracts_infra_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1025,7 +1157,7 @@ func (x *FirewallConfig) String() string {
 func (*FirewallConfig) ProtoMessage() {}
 
 func (x *FirewallConfig) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_contracts_infra_proto_msgTypes[10]
+	mi := &file_internal_contracts_infra_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1038,7 +1170,7 @@ func (x *FirewallConfig) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FirewallConfig.ProtoReflect.Descriptor instead.
 func (*FirewallConfig) Descriptor() ([]byte, []int) {
-	return file_internal_contracts_infra_proto_rawDescGZIP(), []int{10}
+	return file_internal_contracts_infra_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *FirewallConfig) GetProvider() string {
@@ -1105,7 +1237,7 @@ type IAMRoleConfig struct {
 
 func (x *IAMRoleConfig) Reset() {
 	*x = IAMRoleConfig{}
-	mi := &file_internal_contracts_infra_proto_msgTypes[11]
+	mi := &file_internal_contracts_infra_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1117,7 +1249,7 @@ func (x *IAMRoleConfig) String() string {
 func (*IAMRoleConfig) ProtoMessage() {}
 
 func (x *IAMRoleConfig) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_contracts_infra_proto_msgTypes[11]
+	mi := &file_internal_contracts_infra_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1130,7 +1262,7 @@ func (x *IAMRoleConfig) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IAMRoleConfig.ProtoReflect.Descriptor instead.
 func (*IAMRoleConfig) Descriptor() ([]byte, []int) {
-	return file_internal_contracts_infra_proto_rawDescGZIP(), []int{11}
+	return file_internal_contracts_infra_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *IAMRoleConfig) GetProvider() string {
@@ -1198,7 +1330,7 @@ type StorageConfig struct {
 
 func (x *StorageConfig) Reset() {
 	*x = StorageConfig{}
-	mi := &file_internal_contracts_infra_proto_msgTypes[12]
+	mi := &file_internal_contracts_infra_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1210,7 +1342,7 @@ func (x *StorageConfig) String() string {
 func (*StorageConfig) ProtoMessage() {}
 
 func (x *StorageConfig) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_contracts_infra_proto_msgTypes[12]
+	mi := &file_internal_contracts_infra_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1223,7 +1355,7 @@ func (x *StorageConfig) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StorageConfig.ProtoReflect.Descriptor instead.
 func (*StorageConfig) Descriptor() ([]byte, []int) {
-	return file_internal_contracts_infra_proto_rawDescGZIP(), []int{12}
+	return file_internal_contracts_infra_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *StorageConfig) GetProvider() string {
@@ -1297,7 +1429,7 @@ type CertificateConfig struct {
 
 func (x *CertificateConfig) Reset() {
 	*x = CertificateConfig{}
-	mi := &file_internal_contracts_infra_proto_msgTypes[13]
+	mi := &file_internal_contracts_infra_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1309,7 +1441,7 @@ func (x *CertificateConfig) String() string {
 func (*CertificateConfig) ProtoMessage() {}
 
 func (x *CertificateConfig) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_contracts_infra_proto_msgTypes[13]
+	mi := &file_internal_contracts_infra_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1322,7 +1454,7 @@ func (x *CertificateConfig) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CertificateConfig.ProtoReflect.Descriptor instead.
 func (*CertificateConfig) Descriptor() ([]byte, []int) {
-	return file_internal_contracts_infra_proto_rawDescGZIP(), []int{13}
+	return file_internal_contracts_infra_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *CertificateConfig) GetProvider() string {
@@ -1479,6 +1611,25 @@ const file_internal_contracts_infra_proto_rawDesc = "" +
 	"\bsettings\x18\b \x01(\v2\x17.google.protobuf.StructR\bsettings\x1a9\n" +
 	"\vLabelsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x91\x04\n" +
+	"\x12HTTPRedirectConfig\x12\x1a\n" +
+	"\bprovider\x18\x01 \x01(\tR\bprovider\x12\x16\n" +
+	"\x06region\x18\x02 \x01(\tR\x06region\x12\x1c\n" +
+	"\tworkspace\x18\x03 \x01(\tR\tworkspace\x12\x16\n" +
+	"\x06domain\x18\x04 \x01(\tR\x06domain\x12\x1b\n" +
+	"\tfrom_host\x18\x05 \x01(\tR\bfromHost\x12\x1d\n" +
+	"\n" +
+	"target_url\x18\x06 \x01(\tR\ttargetUrl\x12\x1f\n" +
+	"\vstatus_code\x18\a \x01(\x05R\n" +
+	"statusCode\x12#\n" +
+	"\rpreserve_path\x18\b \x01(\bR\fpreservePath\x122\n" +
+	"\x15preserve_query_string\x18\t \x01(\bR\x13preserveQueryString\x12\x18\n" +
+	"\aenabled\x18\n" +
+	" \x01(\bR\aenabled\x12Q\n" +
+	"\x06labels\x18\v \x03(\v29.workflow.plugins.infra.v1.HTTPRedirectConfig.LabelsEntryR\x06labels\x123\n" +
+	"\bsettings\x18\f \x01(\v2\x17.google.protobuf.StructR\bsettings\x1a9\n" +
+	"\vLabelsEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xcd\x02\n" +
 	"\x0eRegistryConfig\x12\x1a\n" +
 	"\bprovider\x18\x01 \x01(\tR\bprovider\x12\x16\n" +
@@ -1562,7 +1713,7 @@ func file_internal_contracts_infra_proto_rawDescGZIP() []byte {
 	return file_internal_contracts_infra_proto_rawDescData
 }
 
-var file_internal_contracts_infra_proto_msgTypes = make([]protoimpl.MessageInfo, 29)
+var file_internal_contracts_infra_proto_msgTypes = make([]protoimpl.MessageInfo, 31)
 var file_internal_contracts_infra_proto_goTypes = []any{
 	(*InfraResourceConfig)(nil),    // 0: workflow.plugins.infra.v1.InfraResourceConfig
 	(*ContainerServiceConfig)(nil), // 1: workflow.plugins.infra.v1.ContainerServiceConfig
@@ -1572,64 +1723,68 @@ var file_internal_contracts_infra_proto_goTypes = []any{
 	(*VPCConfig)(nil),              // 5: workflow.plugins.infra.v1.VPCConfig
 	(*LoadBalancerConfig)(nil),     // 6: workflow.plugins.infra.v1.LoadBalancerConfig
 	(*DNSConfig)(nil),              // 7: workflow.plugins.infra.v1.DNSConfig
-	(*RegistryConfig)(nil),         // 8: workflow.plugins.infra.v1.RegistryConfig
-	(*APIGatewayConfig)(nil),       // 9: workflow.plugins.infra.v1.APIGatewayConfig
-	(*FirewallConfig)(nil),         // 10: workflow.plugins.infra.v1.FirewallConfig
-	(*IAMRoleConfig)(nil),          // 11: workflow.plugins.infra.v1.IAMRoleConfig
-	(*StorageConfig)(nil),          // 12: workflow.plugins.infra.v1.StorageConfig
-	(*CertificateConfig)(nil),      // 13: workflow.plugins.infra.v1.CertificateConfig
-	nil,                            // 14: workflow.plugins.infra.v1.InfraResourceConfig.LabelsEntry
-	nil,                            // 15: workflow.plugins.infra.v1.ContainerServiceConfig.EnvEntry
-	nil,                            // 16: workflow.plugins.infra.v1.ContainerServiceConfig.LabelsEntry
-	nil,                            // 17: workflow.plugins.infra.v1.K8SClusterConfig.LabelsEntry
-	nil,                            // 18: workflow.plugins.infra.v1.DatabaseConfig.LabelsEntry
-	nil,                            // 19: workflow.plugins.infra.v1.CacheConfig.LabelsEntry
-	nil,                            // 20: workflow.plugins.infra.v1.VPCConfig.LabelsEntry
-	nil,                            // 21: workflow.plugins.infra.v1.LoadBalancerConfig.LabelsEntry
-	nil,                            // 22: workflow.plugins.infra.v1.DNSConfig.LabelsEntry
-	nil,                            // 23: workflow.plugins.infra.v1.RegistryConfig.LabelsEntry
-	nil,                            // 24: workflow.plugins.infra.v1.APIGatewayConfig.LabelsEntry
-	nil,                            // 25: workflow.plugins.infra.v1.FirewallConfig.LabelsEntry
-	nil,                            // 26: workflow.plugins.infra.v1.IAMRoleConfig.LabelsEntry
-	nil,                            // 27: workflow.plugins.infra.v1.StorageConfig.LabelsEntry
-	nil,                            // 28: workflow.plugins.infra.v1.CertificateConfig.LabelsEntry
-	(*structpb.Struct)(nil),        // 29: google.protobuf.Struct
+	(*HTTPRedirectConfig)(nil),     // 8: workflow.plugins.infra.v1.HTTPRedirectConfig
+	(*RegistryConfig)(nil),         // 9: workflow.plugins.infra.v1.RegistryConfig
+	(*APIGatewayConfig)(nil),       // 10: workflow.plugins.infra.v1.APIGatewayConfig
+	(*FirewallConfig)(nil),         // 11: workflow.plugins.infra.v1.FirewallConfig
+	(*IAMRoleConfig)(nil),          // 12: workflow.plugins.infra.v1.IAMRoleConfig
+	(*StorageConfig)(nil),          // 13: workflow.plugins.infra.v1.StorageConfig
+	(*CertificateConfig)(nil),      // 14: workflow.plugins.infra.v1.CertificateConfig
+	nil,                            // 15: workflow.plugins.infra.v1.InfraResourceConfig.LabelsEntry
+	nil,                            // 16: workflow.plugins.infra.v1.ContainerServiceConfig.EnvEntry
+	nil,                            // 17: workflow.plugins.infra.v1.ContainerServiceConfig.LabelsEntry
+	nil,                            // 18: workflow.plugins.infra.v1.K8SClusterConfig.LabelsEntry
+	nil,                            // 19: workflow.plugins.infra.v1.DatabaseConfig.LabelsEntry
+	nil,                            // 20: workflow.plugins.infra.v1.CacheConfig.LabelsEntry
+	nil,                            // 21: workflow.plugins.infra.v1.VPCConfig.LabelsEntry
+	nil,                            // 22: workflow.plugins.infra.v1.LoadBalancerConfig.LabelsEntry
+	nil,                            // 23: workflow.plugins.infra.v1.DNSConfig.LabelsEntry
+	nil,                            // 24: workflow.plugins.infra.v1.HTTPRedirectConfig.LabelsEntry
+	nil,                            // 25: workflow.plugins.infra.v1.RegistryConfig.LabelsEntry
+	nil,                            // 26: workflow.plugins.infra.v1.APIGatewayConfig.LabelsEntry
+	nil,                            // 27: workflow.plugins.infra.v1.FirewallConfig.LabelsEntry
+	nil,                            // 28: workflow.plugins.infra.v1.IAMRoleConfig.LabelsEntry
+	nil,                            // 29: workflow.plugins.infra.v1.StorageConfig.LabelsEntry
+	nil,                            // 30: workflow.plugins.infra.v1.CertificateConfig.LabelsEntry
+	(*structpb.Struct)(nil),        // 31: google.protobuf.Struct
 }
 var file_internal_contracts_infra_proto_depIdxs = []int32{
-	14, // 0: workflow.plugins.infra.v1.InfraResourceConfig.labels:type_name -> workflow.plugins.infra.v1.InfraResourceConfig.LabelsEntry
-	29, // 1: workflow.plugins.infra.v1.InfraResourceConfig.settings:type_name -> google.protobuf.Struct
-	15, // 2: workflow.plugins.infra.v1.ContainerServiceConfig.env:type_name -> workflow.plugins.infra.v1.ContainerServiceConfig.EnvEntry
-	16, // 3: workflow.plugins.infra.v1.ContainerServiceConfig.labels:type_name -> workflow.plugins.infra.v1.ContainerServiceConfig.LabelsEntry
-	29, // 4: workflow.plugins.infra.v1.ContainerServiceConfig.settings:type_name -> google.protobuf.Struct
-	17, // 5: workflow.plugins.infra.v1.K8SClusterConfig.labels:type_name -> workflow.plugins.infra.v1.K8SClusterConfig.LabelsEntry
-	29, // 6: workflow.plugins.infra.v1.K8SClusterConfig.settings:type_name -> google.protobuf.Struct
-	18, // 7: workflow.plugins.infra.v1.DatabaseConfig.labels:type_name -> workflow.plugins.infra.v1.DatabaseConfig.LabelsEntry
-	29, // 8: workflow.plugins.infra.v1.DatabaseConfig.settings:type_name -> google.protobuf.Struct
-	19, // 9: workflow.plugins.infra.v1.CacheConfig.labels:type_name -> workflow.plugins.infra.v1.CacheConfig.LabelsEntry
-	29, // 10: workflow.plugins.infra.v1.CacheConfig.settings:type_name -> google.protobuf.Struct
-	20, // 11: workflow.plugins.infra.v1.VPCConfig.labels:type_name -> workflow.plugins.infra.v1.VPCConfig.LabelsEntry
-	29, // 12: workflow.plugins.infra.v1.VPCConfig.settings:type_name -> google.protobuf.Struct
-	21, // 13: workflow.plugins.infra.v1.LoadBalancerConfig.labels:type_name -> workflow.plugins.infra.v1.LoadBalancerConfig.LabelsEntry
-	29, // 14: workflow.plugins.infra.v1.LoadBalancerConfig.settings:type_name -> google.protobuf.Struct
-	22, // 15: workflow.plugins.infra.v1.DNSConfig.labels:type_name -> workflow.plugins.infra.v1.DNSConfig.LabelsEntry
-	29, // 16: workflow.plugins.infra.v1.DNSConfig.settings:type_name -> google.protobuf.Struct
-	23, // 17: workflow.plugins.infra.v1.RegistryConfig.labels:type_name -> workflow.plugins.infra.v1.RegistryConfig.LabelsEntry
-	29, // 18: workflow.plugins.infra.v1.RegistryConfig.settings:type_name -> google.protobuf.Struct
-	24, // 19: workflow.plugins.infra.v1.APIGatewayConfig.labels:type_name -> workflow.plugins.infra.v1.APIGatewayConfig.LabelsEntry
-	29, // 20: workflow.plugins.infra.v1.APIGatewayConfig.settings:type_name -> google.protobuf.Struct
-	25, // 21: workflow.plugins.infra.v1.FirewallConfig.labels:type_name -> workflow.plugins.infra.v1.FirewallConfig.LabelsEntry
-	29, // 22: workflow.plugins.infra.v1.FirewallConfig.settings:type_name -> google.protobuf.Struct
-	26, // 23: workflow.plugins.infra.v1.IAMRoleConfig.labels:type_name -> workflow.plugins.infra.v1.IAMRoleConfig.LabelsEntry
-	29, // 24: workflow.plugins.infra.v1.IAMRoleConfig.settings:type_name -> google.protobuf.Struct
-	27, // 25: workflow.plugins.infra.v1.StorageConfig.labels:type_name -> workflow.plugins.infra.v1.StorageConfig.LabelsEntry
-	29, // 26: workflow.plugins.infra.v1.StorageConfig.settings:type_name -> google.protobuf.Struct
-	28, // 27: workflow.plugins.infra.v1.CertificateConfig.labels:type_name -> workflow.plugins.infra.v1.CertificateConfig.LabelsEntry
-	29, // 28: workflow.plugins.infra.v1.CertificateConfig.settings:type_name -> google.protobuf.Struct
-	29, // [29:29] is the sub-list for method output_type
-	29, // [29:29] is the sub-list for method input_type
-	29, // [29:29] is the sub-list for extension type_name
-	29, // [29:29] is the sub-list for extension extendee
-	0,  // [0:29] is the sub-list for field type_name
+	15, // 0: workflow.plugins.infra.v1.InfraResourceConfig.labels:type_name -> workflow.plugins.infra.v1.InfraResourceConfig.LabelsEntry
+	31, // 1: workflow.plugins.infra.v1.InfraResourceConfig.settings:type_name -> google.protobuf.Struct
+	16, // 2: workflow.plugins.infra.v1.ContainerServiceConfig.env:type_name -> workflow.plugins.infra.v1.ContainerServiceConfig.EnvEntry
+	17, // 3: workflow.plugins.infra.v1.ContainerServiceConfig.labels:type_name -> workflow.plugins.infra.v1.ContainerServiceConfig.LabelsEntry
+	31, // 4: workflow.plugins.infra.v1.ContainerServiceConfig.settings:type_name -> google.protobuf.Struct
+	18, // 5: workflow.plugins.infra.v1.K8SClusterConfig.labels:type_name -> workflow.plugins.infra.v1.K8SClusterConfig.LabelsEntry
+	31, // 6: workflow.plugins.infra.v1.K8SClusterConfig.settings:type_name -> google.protobuf.Struct
+	19, // 7: workflow.plugins.infra.v1.DatabaseConfig.labels:type_name -> workflow.plugins.infra.v1.DatabaseConfig.LabelsEntry
+	31, // 8: workflow.plugins.infra.v1.DatabaseConfig.settings:type_name -> google.protobuf.Struct
+	20, // 9: workflow.plugins.infra.v1.CacheConfig.labels:type_name -> workflow.plugins.infra.v1.CacheConfig.LabelsEntry
+	31, // 10: workflow.plugins.infra.v1.CacheConfig.settings:type_name -> google.protobuf.Struct
+	21, // 11: workflow.plugins.infra.v1.VPCConfig.labels:type_name -> workflow.plugins.infra.v1.VPCConfig.LabelsEntry
+	31, // 12: workflow.plugins.infra.v1.VPCConfig.settings:type_name -> google.protobuf.Struct
+	22, // 13: workflow.plugins.infra.v1.LoadBalancerConfig.labels:type_name -> workflow.plugins.infra.v1.LoadBalancerConfig.LabelsEntry
+	31, // 14: workflow.plugins.infra.v1.LoadBalancerConfig.settings:type_name -> google.protobuf.Struct
+	23, // 15: workflow.plugins.infra.v1.DNSConfig.labels:type_name -> workflow.plugins.infra.v1.DNSConfig.LabelsEntry
+	31, // 16: workflow.plugins.infra.v1.DNSConfig.settings:type_name -> google.protobuf.Struct
+	24, // 17: workflow.plugins.infra.v1.HTTPRedirectConfig.labels:type_name -> workflow.plugins.infra.v1.HTTPRedirectConfig.LabelsEntry
+	31, // 18: workflow.plugins.infra.v1.HTTPRedirectConfig.settings:type_name -> google.protobuf.Struct
+	25, // 19: workflow.plugins.infra.v1.RegistryConfig.labels:type_name -> workflow.plugins.infra.v1.RegistryConfig.LabelsEntry
+	31, // 20: workflow.plugins.infra.v1.RegistryConfig.settings:type_name -> google.protobuf.Struct
+	26, // 21: workflow.plugins.infra.v1.APIGatewayConfig.labels:type_name -> workflow.plugins.infra.v1.APIGatewayConfig.LabelsEntry
+	31, // 22: workflow.plugins.infra.v1.APIGatewayConfig.settings:type_name -> google.protobuf.Struct
+	27, // 23: workflow.plugins.infra.v1.FirewallConfig.labels:type_name -> workflow.plugins.infra.v1.FirewallConfig.LabelsEntry
+	31, // 24: workflow.plugins.infra.v1.FirewallConfig.settings:type_name -> google.protobuf.Struct
+	28, // 25: workflow.plugins.infra.v1.IAMRoleConfig.labels:type_name -> workflow.plugins.infra.v1.IAMRoleConfig.LabelsEntry
+	31, // 26: workflow.plugins.infra.v1.IAMRoleConfig.settings:type_name -> google.protobuf.Struct
+	29, // 27: workflow.plugins.infra.v1.StorageConfig.labels:type_name -> workflow.plugins.infra.v1.StorageConfig.LabelsEntry
+	31, // 28: workflow.plugins.infra.v1.StorageConfig.settings:type_name -> google.protobuf.Struct
+	30, // 29: workflow.plugins.infra.v1.CertificateConfig.labels:type_name -> workflow.plugins.infra.v1.CertificateConfig.LabelsEntry
+	31, // 30: workflow.plugins.infra.v1.CertificateConfig.settings:type_name -> google.protobuf.Struct
+	31, // [31:31] is the sub-list for method output_type
+	31, // [31:31] is the sub-list for method input_type
+	31, // [31:31] is the sub-list for extension type_name
+	31, // [31:31] is the sub-list for extension extendee
+	0,  // [0:31] is the sub-list for field type_name
 }
 
 func init() { file_internal_contracts_infra_proto_init() }
@@ -1643,7 +1798,7 @@ func file_internal_contracts_infra_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_internal_contracts_infra_proto_rawDesc), len(file_internal_contracts_infra_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   29,
+			NumMessages:   31,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

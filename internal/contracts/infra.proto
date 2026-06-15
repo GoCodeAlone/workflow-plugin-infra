@@ -93,6 +93,21 @@ message DNSConfig {
   google.protobuf.Struct settings = 8;
 }
 
+message HTTPRedirectConfig {
+  string provider = 1;
+  string region = 2;
+  string workspace = 3;
+  string domain = 4;
+  string from_host = 5;
+  string target_url = 6;
+  int32 status_code = 7;
+  bool preserve_path = 8;
+  bool preserve_query_string = 9;
+  bool enabled = 10;
+  map<string, string> labels = 11;
+  google.protobuf.Struct settings = 12;
+}
+
 message RegistryConfig {
   string provider = 1;
   string region = 2;
