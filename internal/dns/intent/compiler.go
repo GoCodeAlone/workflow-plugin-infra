@@ -3,6 +3,7 @@ package intent
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -32,6 +33,7 @@ type DomainIntent struct {
 	RecordsPolicy              string   `json:"records_policy" yaml:"records_policy"`
 	ExpectedCurrentNameservers []string `json:"expected_current_nameservers,omitempty" yaml:"expected_current_nameservers,omitempty"`
 	AllowDiscardNonparked      bool     `json:"allow_discard_nonparked,omitempty" yaml:"allow_discard_nonparked,omitempty"`
+	ForwardTo                  string   `json:"forward_to,omitempty" yaml:"forward_to,omitempty"`
 }
 
 type Options struct {
@@ -70,6 +72,7 @@ type Action struct {
 	RecordCount                *int     `json:"record_count,omitempty" yaml:"record_count,omitempty"`
 	ManageUnlisted             *bool    `json:"manage_unlisted,omitempty" yaml:"manage_unlisted,omitempty"`
 	RecordsPolicy              string   `json:"records_policy,omitempty" yaml:"records_policy,omitempty"`
+	TargetURL                  string   `json:"target_url,omitempty" yaml:"target_url,omitempty"`
 	DesiredNameservers         []string `json:"desired_nameservers,omitempty" yaml:"desired_nameservers,omitempty"`
 	ExpectedCurrentNameservers []string `json:"expected_current_nameservers,omitempty" yaml:"expected_current_nameservers,omitempty"`
 }
@@ -218,6 +221,14 @@ func reconcileDomain(domain string, cfg DomainIntent, snapshots []record.Snapsho
 			blockers = append(blockers, fmt.Sprintf("current registrar nameservers %q did not match expected %q", strings.Join(current, ","), strings.Join(expected, ",")))
 		}
 	}
+	if strings.TrimSpace(cfg.ForwardTo) != "" {
+		if desiredDNSHost != "cloudflare" {
+			blockers = append(blockers, "forward_to is only supported for dns_host cloudflare")
+		}
+		if err := validateForwardTarget(cfg.ForwardTo); err != nil {
+			blockers = append(blockers, err.Error())
+		}
+	}
 
 	plan := recordPlan{}
 	if stageDNS(cfg) {
@@ -257,6 +268,29 @@ func reconcileDomain(domain string, cfg DomainIntent, snapshots []record.Snapsho
 				"domain":          domain,
 				"manage_unlisted": plan.manageUnlisted,
 				"records":         plan.records,
+			},
+		})
+	}
+	if strings.TrimSpace(cfg.ForwardTo) != "" {
+		resource := resourceName("cf-redirect", domain)
+		targetURL := strings.TrimSpace(cfg.ForwardTo)
+		report.Actions = append(report.Actions, Action{
+			Type:      "configure_redirect",
+			Provider:  "cloudflare",
+			Resource:  resource,
+			TargetURL: targetURL,
+		})
+		modules = append(modules, config.ModuleConfig{
+			Name: resource,
+			Type: "infra.http_redirect",
+			Config: map[string]any{
+				"provider":              "cloudflare",
+				"domain":                domain,
+				"from_host":             domain,
+				"target_url":            targetURL,
+				"status_code":           301,
+				"preserve_path":         true,
+				"preserve_query_string": true,
 			},
 		})
 	}
@@ -353,10 +387,10 @@ func planRecords(domain string, cfg DomainIntent, policy string, group []record.
 	switch policy {
 	case "discard_parked":
 		if hasHover && parkedHoverRecords(hoverSnapshot.Records) {
-			return recordPlan{records: []map[string]any{}, manageUnlisted: true}
+			return recordPlan{records: redirectProxyRecordsIfNeeded(domain, cfg), manageUnlisted: true}
 		}
 		if cfg.AllowDiscardNonparked {
-			return recordPlan{records: []map[string]any{}, manageUnlisted: true}
+			return recordPlan{records: redirectProxyRecordsIfNeeded(domain, cfg), manageUnlisted: true}
 		}
 		return recordPlan{blockers: []string{"records_policy discard_parked requested but Hover records do not match parked-record pattern"}}
 	case "preserve_authoritative":
@@ -372,6 +406,31 @@ func planRecords(domain string, cfg DomainIntent, policy string, group []record.
 	default:
 		return recordPlan{blockers: []string{fmt.Sprintf("unsupported records_policy %q", policy)}}
 	}
+}
+
+func validateForwardTarget(raw string) error {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return fmt.Errorf("forward_to must be an absolute http(s) URL")
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return fmt.Errorf("forward_to scheme must be http or https")
+	}
+	return nil
+}
+
+func redirectProxyRecordsIfNeeded(domain string, cfg DomainIntent) []map[string]any {
+	if strings.TrimSpace(cfg.ForwardTo) == "" {
+		return []map[string]any{}
+	}
+	return []map[string]any{{
+		"type":    "A",
+		"name":    "@",
+		"data":    "192.0.2.1",
+		"ttl":     1,
+		"proxied": true,
+		"comment": "Originless placeholder for Cloudflare redirect rules",
+	}}
 }
 
 func stageDNS(cfg DomainIntent) bool {

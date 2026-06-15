@@ -24,3 +24,11 @@ Cross-cutting DNS policy and apply gates remain in wfctl core because `wfctl inf
 - `wfctl infra apply` — enforces the DNS ownership gate as a pre-action hook for `infra.dns` resources
 
 The previous per-provider DNS adapter pages (`docs/providers/*.md`) and the `infra.dns_record` step type were removed in v1.0.0; the legacy step's peer-dispatch model was architecturally unsupported (see `docs/plans/2026-05-26-dns-provider-contract-design.md`).
+
+Domain intent may also include `forward_to` for redirect-only domains moving to
+Cloudflare DNS. The compiler emits:
+
+- a Cloudflare `infra.dns` resource containing an originless proxied `A @
+  192.0.2.1` placeholder when `records_policy: discard_parked` is used; and
+- a Cloudflare `infra.http_redirect` resource targeting `forward_to`, preserving
+  path and query string by default.
