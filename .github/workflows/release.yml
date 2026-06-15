@@ -52,6 +52,42 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GOPRIVATE: github.com/GoCodeAlone/*
           GONOSUMCHECK: github.com/GoCodeAlone/*
+      - name: Verify archive manifests match source (post-build)
+        run: |
+          set -euo pipefail
+          source_modules="$(jq -c '.capabilities.moduleTypes | sort' plugin.json)"
+          source_contracts="$(jq -c '[.contracts[] | select(.kind == "module") | .type] | sort' plugin.contracts.json)"
+          checked=0
+          while IFS= read -r archive; do
+            checked=$((checked + 1))
+            extract_dir="$(mktemp -d)"
+            tar -xzf "$archive" -C "$extract_dir"
+            if [ ! -f "$extract_dir/plugin.json" ]; then
+              echo "::error title=Archive manifest missing::${archive} does not contain plugin.json"
+              exit 1
+            fi
+            if [ ! -f "$extract_dir/plugin.contracts.json" ]; then
+              echo "::error title=Archive contracts missing::${archive} does not contain plugin.contracts.json"
+              exit 1
+            fi
+            archive_modules="$(jq -c '.capabilities.moduleTypes | sort' "$extract_dir/plugin.json")"
+            archive_contracts="$(jq -c '[.contracts[] | select(.kind == "module") | .type] | sort' "$extract_dir/plugin.contracts.json")"
+            if [ "$archive_modules" != "$source_modules" ]; then
+              echo "::error title=Archive module capabilities drift::${archive} plugin.json moduleTypes do not match source plugin.json"
+              diff -u <(printf '%s\n' "$source_modules" | jq -r '.[]') <(printf '%s\n' "$archive_modules" | jq -r '.[]') || true
+              exit 1
+            fi
+            if [ "$archive_contracts" != "$source_contracts" ]; then
+              echo "::error title=Archive contracts drift::${archive} plugin.contracts.json module contracts do not match source plugin.contracts.json"
+              diff -u <(printf '%s\n' "$source_contracts" | jq -r '.[]') <(printf '%s\n' "$archive_contracts" | jq -r '.[]') || true
+              exit 1
+            fi
+          done < <(jq -r '.[] | select(.type == "Archive") | .path' dist/artifacts.json)
+          if [ "$checked" -eq 0 ]; then
+            echo "::error title=No archives found::dist/artifacts.json did not list any release archives"
+            exit 1
+          fi
+          echo "Verified $checked release archive manifest(s)."
       # workflow#765: runtime truth-check via plugin verify-capabilities.
       - name: Verify capabilities (runtime truth-check)
         run: |
