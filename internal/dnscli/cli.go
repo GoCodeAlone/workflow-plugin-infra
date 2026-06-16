@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/GoCodeAlone/workflow-plugin-infra/internal/dns/intent"
+	"github.com/GoCodeAlone/workflow-plugin-infra/internal/dns/stage"
 	"gopkg.in/yaml.v3"
 )
 
@@ -46,6 +47,8 @@ func (c *CLI) runDNS(args []string) error {
 	switch args[0] {
 	case "intent":
 		return c.runDNSIntent(args[1:])
+	case "stage":
+		return c.runDNSStage(args[1:])
 	case "-h", "--help", "help":
 		return dnsUsageHelp()
 	default:
@@ -60,6 +63,7 @@ DNS orchestration helpers.
 
 Subcommands:
   intent   Compile and reconcile domain intent into infra resources
+  stage    Compile provider staging resources from DNS portfolios
 `)
 	return fmt.Errorf("missing or unknown subcommand")
 }
@@ -98,6 +102,77 @@ Subcommands:
 func dnsIntentUsageHelp() error {
 	_ = dnsIntentUsage()
 	return flag.ErrHelp
+}
+
+func (c *CLI) runDNSStage(args []string) error {
+	if len(args) < 1 {
+		return dnsStageUsage()
+	}
+	switch args[0] {
+	case "cloudflare":
+		return c.runDNSStageCloudflare(args[1:])
+	case "-h", "--help", "help":
+		return dnsStageUsageHelp()
+	default:
+		return fmt.Errorf("dns stage: unknown subcommand %q", args[0])
+	}
+}
+
+func dnsStageUsage() error {
+	fmt.Fprint(os.Stderr, `Usage: wfctl dns stage <provider> [flags]
+
+Subcommands:
+  cloudflare   Compile Cloudflare infra.dns staging resources from DNS portfolios
+`)
+	return fmt.Errorf("missing or unknown subcommand")
+}
+
+func dnsStageUsageHelp() error {
+	_ = dnsStageUsage()
+	return flag.ErrHelp
+}
+
+func (c *CLI) runDNSStageCloudflare(args []string) error {
+	opts, err := parseStageCloudflareOptions(args)
+	if err != nil {
+		return err
+	}
+	bundle, err := stage.CompileCloudflare(stage.CloudflareOptions{
+		PortfolioGlobs: splitCSV(opts.portfolioCSV),
+		Scope:          opts.scope,
+		DomainFilter:   opts.domain,
+		StateDir:       opts.stateDir,
+	})
+	if err != nil {
+		return err
+	}
+	configBytes, err := yaml.Marshal(bundle.Config)
+	if err != nil {
+		return fmt.Errorf("marshal generated config: %w", err)
+	}
+	reportBytes, err := json.MarshalIndent(bundle.Report, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal report: %w", err)
+	}
+	reportBytes = append(reportBytes, '\n')
+	if err := writeFileCreatingParents(opts.outputPath, configBytes); err != nil {
+		return err
+	}
+	if err := writeFileCreatingParents(opts.reportPath, reportBytes); err != nil {
+		return err
+	}
+	if opts.bundlePath != "" {
+		bundleBytes, err := json.MarshalIndent(bundle, "", "  ")
+		if err != nil {
+			return fmt.Errorf("marshal bundle: %w", err)
+		}
+		bundleBytes = append(bundleBytes, '\n')
+		if err := writeFileCreatingParents(opts.bundlePath, bundleBytes); err != nil {
+			return err
+		}
+	}
+	fmt.Fprintf(os.Stderr, "Selected domains: %d / %d (scope=%s)\n", bundle.Report.SelectedDomains, bundle.Report.TotalCatalogDomains, bundle.Report.Scope)
+	return nil
 }
 
 func (c *CLI) runDNSIntentCompile(args []string) error {
@@ -186,6 +261,16 @@ type reconcileOptions struct {
 	allowEmpty  bool
 }
 
+type stageCloudflareOptions struct {
+	portfolioCSV string
+	scope        string
+	domain       string
+	outputPath   string
+	reportPath   string
+	bundlePath   string
+	stateDir     string
+}
+
 func parseCompileOptions(name string, args []string) (compileOptions, error) {
 	fs := flag.NewFlagSet(name, flag.ContinueOnError)
 	var opts compileOptions
@@ -225,6 +310,25 @@ func parseReconcileOptions(args []string) (reconcileOptions, error) {
 	}
 	if fs.NArg() > 0 {
 		return opts, fmt.Errorf("dns intent reconcile: unexpected positional argument(s): %s", strings.Join(fs.Args(), " "))
+	}
+	return opts, nil
+}
+
+func parseStageCloudflareOptions(args []string) (stageCloudflareOptions, error) {
+	fs := flag.NewFlagSet("dns stage cloudflare", flag.ContinueOnError)
+	var opts stageCloudflareOptions
+	fs.StringVar(&opts.portfolioCSV, "portfolio", "zones/*.portfolio.json", "Comma-separated DNS portfolio JSON paths or globs")
+	fs.StringVar(&opts.scope, "scope", "safe", "Stage scope: safe or all")
+	fs.StringVar(&opts.domain, "domain", "", "Optional single domain to stage")
+	fs.StringVar(&opts.outputPath, "output", "infra/cloudflare-staging.generated.wfctl.yaml", "Generated wfctl config path")
+	fs.StringVar(&opts.reportPath, "report", "reports/cloudflare-staging-report.json", "Generated JSON report path")
+	fs.StringVar(&opts.bundlePath, "bundle", "", "Optional combined JSON bundle path")
+	fs.StringVar(&opts.stateDir, "state-dir", ".state/cloudflare-staging/", "Filesystem state directory for generated iac.state")
+	if err := fs.Parse(args); err != nil {
+		return opts, err
+	}
+	if fs.NArg() > 0 {
+		return opts, fmt.Errorf("dns stage cloudflare: unexpected positional argument(s): %s", strings.Join(fs.Args(), " "))
 	}
 	return opts, nil
 }

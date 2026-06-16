@@ -18,6 +18,108 @@ func TestRunCLIHelpSucceeds(t *testing.T) {
 	}
 }
 
+func TestRunDNSStageCloudflareWritesConfigAndReport(t *testing.T) {
+	dir := t.TempDir()
+	portfolioPath := writeFile(t, dir, "portfolio.json", `{
+  "schema": "workflow.dns-portfolio.export.v1",
+  "snapshots": [
+    {
+      "id": "hover-example-com",
+      "provider": "hover",
+      "domain": "example.com",
+      "authority": {"registrar_nameservers": ["ns1.hover.com", "ns2.hover.com"]},
+      "records": [
+        {"type": "A", "name": "@", "value": "216.40.34.41", "ttl": 900},
+        {"type": "MX", "name": "@", "value": "10 mx.hover.com.cust.hostedemail.com", "ttl": 900},
+        {"type": "NS", "name": "@", "value": "ns1.hover.com", "ttl": 900}
+      ]
+    },
+    {
+      "id": "wix-example-net",
+      "provider": "hover",
+      "domain": "example.net",
+      "authority": {"registrar_nameservers": ["ns12.wixdns.net", "ns13.wixdns.net"]},
+      "records": [{"type": "A", "name": "@", "value": "216.40.34.41", "ttl": 900}]
+    },
+    {
+      "id": "do-example-org",
+      "provider": "digitalocean",
+      "domain": "example.org",
+      "records": [{"type": "A", "name": "@", "value": "192.0.2.50", "ttl": 300}]
+    },
+    {
+      "id": "hover-example-org",
+      "provider": "hover",
+      "domain": "example.org",
+      "records": [{"type": "A", "name": "@", "value": "216.40.34.41", "ttl": 900}]
+    }
+  ]
+}`)
+	outputPath := filepath.Join(dir, "cloudflare.yaml")
+	reportPath := filepath.Join(dir, "report.json")
+
+	code := New().RunCLI([]string{"dns", "stage", "cloudflare",
+		"--portfolio", portfolioPath,
+		"--scope", "safe",
+		"--output", outputPath,
+		"--report", reportPath,
+		"--state-dir", ".state/test-cloudflare/",
+	})
+	if code != 0 {
+		t.Fatalf("RunCLI stage cloudflare exit = %d, want 0", code)
+	}
+
+	cfgData, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatalf("read output config: %v", err)
+	}
+	var cfg struct {
+		Modules []yamlTestModule `yaml:"modules"`
+	}
+	if err := yaml.Unmarshal(cfgData, &cfg); err != nil {
+		t.Fatalf("parse output config: %v\n%s", err, cfgData)
+	}
+	dns := yamlModuleByName(cfg.Modules, "cf-example-com")
+	if dns == nil {
+		t.Fatalf("generated config missing cf-example-com: %#v", cfg.Modules)
+	}
+	if dns.Type != "infra.dns" {
+		t.Fatalf("module type = %q, want infra.dns", dns.Type)
+	}
+	records, ok := dns.Config["records"].([]any)
+	if !ok || len(records) != 2 {
+		t.Fatalf("records = %#v, want A+MX only", dns.Config["records"])
+	}
+	if blocked := yamlModuleByName(cfg.Modules, "cf-example-net"); blocked != nil {
+		t.Fatalf("safe scope should exclude external authority module: %#v", blocked)
+	}
+
+	reportData, err := os.ReadFile(reportPath)
+	if err != nil {
+		t.Fatalf("read report: %v", err)
+	}
+	var report struct {
+		Schema          string `json:"schema"`
+		Scope           string `json:"scope"`
+		SelectedDomains int    `json:"selected_domains"`
+		BlockedByScope  int    `json:"blocked_by_scope"`
+		Domains         []struct {
+			Domain         string `json:"domain"`
+			Classification string `json:"classification"`
+			RecordCount    int    `json:"record_count"`
+		} `json:"domains"`
+	}
+	if err := json.Unmarshal(reportData, &report); err != nil {
+		t.Fatalf("parse report: %v\n%s", err, reportData)
+	}
+	if report.Schema != "workflow.dns-stage.cloudflare.report.v1" || report.Scope != "safe" || report.SelectedDomains != 1 || report.BlockedByScope != 2 {
+		t.Fatalf("bad report summary: %+v", report)
+	}
+	if len(report.Domains) != 3 {
+		t.Fatalf("report domains = %d, want 3", len(report.Domains))
+	}
+}
+
 func TestRunDNSIntentReconcilePlansWithGeneratedConfig(t *testing.T) {
 	dir := t.TempDir()
 	intentPath := writeFile(t, dir, "domains.json", `{
@@ -268,4 +370,19 @@ func captureStdout(t *testing.T, fn func()) string {
 		t.Fatalf("read stdout: %v", err)
 	}
 	return string(data)
+}
+
+type yamlTestModule struct {
+	Name   string         `yaml:"name"`
+	Type   string         `yaml:"type"`
+	Config map[string]any `yaml:"config"`
+}
+
+func yamlModuleByName(modules []yamlTestModule, name string) *yamlTestModule {
+	for i := range modules {
+		if modules[i].Name == name {
+			return &modules[i]
+		}
+	}
+	return nil
 }

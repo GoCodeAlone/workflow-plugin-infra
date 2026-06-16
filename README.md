@@ -16,6 +16,7 @@ Per-provider DNS support lives in the respective provider plugins (workflow-plug
 
 - `wfctl dns intent compile` — compile domain intent JSON plus DNS portfolio exports into generated `infra.dns` / `infra.dns_delegation` config and a report
 - `wfctl dns intent reconcile` — compile, validate, and run `wfctl infra plan` / `wfctl infra apply` for that generated config
+- `wfctl dns stage cloudflare` — compile Cloudflare `infra.dns` staging config and an audit report directly from DNS portfolio exports
 - `wfctl infra import-all --provider <m> --type infra.dns` — bulk import every zone an account holds, via the provider's `IaCProviderEnumerator`
 
 Cross-cutting DNS policy and apply gates remain in wfctl core because `wfctl infra apply` owns that lifecycle hook:
@@ -32,3 +33,15 @@ Cloudflare DNS. The compiler emits:
   192.0.2.1` placeholder when `records_policy: discard_parked` is used; and
 - a Cloudflare `infra.http_redirect` resource targeting `forward_to`, preserving
   path and query string by default.
+
+Cloudflare staging uses committed DNS portfolio exports as input and emits
+ordinary IaC resources; provider plugins still own the actual Cloudflare API
+calls through `wfctl infra plan/apply`:
+
+```sh
+wfctl dns stage cloudflare \
+  --portfolio 'zones/*.portfolio.json' \
+  --scope safe \
+  --output infra/cloudflare-staging.generated.wfctl.yaml \
+  --report reports/cloudflare-staging-report.json
+```
