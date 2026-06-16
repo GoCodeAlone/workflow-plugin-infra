@@ -403,8 +403,8 @@ func recordDataAndPriority(rec record.Record) (string, int) {
 }
 
 func quoteTXTData(data string) string {
-	data = strings.TrimSpace(data)
-	if strings.HasPrefix(data, `"`) && strings.HasSuffix(data, `"`) {
+	trimmed := strings.TrimSpace(data)
+	if strings.HasPrefix(trimmed, `"`) && strings.HasSuffix(trimmed, `"`) {
 		return data
 	}
 	return strconv.Quote(data)

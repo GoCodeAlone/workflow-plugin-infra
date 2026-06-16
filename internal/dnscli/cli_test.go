@@ -91,8 +91,8 @@ func TestRunDNSStageCloudflareWritesConfigAndReport(t *testing.T) {
 	if !ok || len(records) != 4 || !hasYAMLManagedMarker(records) {
 		t.Fatalf("records = %#v, want A+MX+TXT plus managed marker", dns.Config["records"])
 	}
-	if !strings.Contains(string(cfgData), `data: '"google-site-verification=abc123"'`) {
-		t.Fatalf("generated TXT YAML is not visibly quoted:\n%s", cfgData)
+	if !hasYAMLRecordData(records, "TXT", "@", `"google-site-verification=abc123"`) {
+		t.Fatalf("TXT records = %#v, want quoted google-site-verification data", records)
 	}
 	if blocked := yamlModuleByName(cfg.Modules, "cf-example-net"); blocked != nil {
 		t.Fatalf("safe scope should exclude external authority module: %#v", blocked)
@@ -562,6 +562,19 @@ func hasYAMLManagedMarker(records []any) bool {
 	for _, raw := range records {
 		record, ok := raw.(map[string]any)
 		if ok && record["type"] == "TXT" && record["name"] == "_workflow-dns-managed" {
+			return true
+		}
+	}
+	return false
+}
+
+func hasYAMLRecordData(records []any, recordType, name, data string) bool {
+	for _, raw := range records {
+		record, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if record["type"] == recordType && record["name"] == name && record["data"] == data {
 			return true
 		}
 	}

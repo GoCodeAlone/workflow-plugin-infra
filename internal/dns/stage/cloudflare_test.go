@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/GoCodeAlone/workflow-plugin-infra/internal/dns/record"
 )
 
 func TestCompileCloudflareAddsManagedByTXTMarker(t *testing.T) {
@@ -56,5 +58,17 @@ func TestCompileCloudflareAddsManagedByTXTMarker(t *testing.T) {
 		if !strings.Contains(data, want) {
 			t.Fatalf("marker data = %q, missing %q", data, want)
 		}
+	}
+}
+
+func TestCloudflareRecordsQuotesTXTWithoutTrimmingValue(t *testing.T) {
+	records := cloudflareRecords("example.com", []record.Record{
+		{Type: "TXT", Name: "@", Value: "  token with edge spaces  ", TTL: 300},
+	})
+	if len(records) != 1 {
+		t.Fatalf("records = %#v, want one TXT", records)
+	}
+	if got, want := records[0]["data"], `"  token with edge spaces  "`; got != want {
+		t.Fatalf("TXT data = %#v, want %#v", got, want)
 	}
 }
