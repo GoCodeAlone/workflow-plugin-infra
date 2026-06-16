@@ -70,8 +70,8 @@ func TestCompileDiscardParkedProducesCloudflareAndHoverResources(t *testing.T) {
 		t.Fatalf("manage_unlisted = %#v, want true", got.Config["manage_unlisted"])
 	}
 	records, ok := got.Config["records"].([]map[string]any)
-	if !ok || len(records) != 0 {
-		t.Fatalf("records = %#v, want empty []map[string]any", got.Config["records"])
+	if !ok || len(records) != 1 || managedMarkerRecord(records) == nil {
+		t.Fatalf("records = %#v, want only managed marker", got.Config["records"])
 	}
 	delegation := moduleByName(bundle.Config.Modules, "hover-delegation-example-com")
 	if delegation == nil || delegation.Type != "infra.dns_delegation" {
@@ -140,8 +140,8 @@ func TestCompileForwardToProducesCloudflareRedirectResource(t *testing.T) {
 		t.Fatalf("missing cloudflare DNS module: %+v", bundle.Config.Modules)
 	}
 	records, ok := dns.Config["records"].([]map[string]any)
-	if !ok || len(records) != 1 {
-		t.Fatalf("dns records = %#v, want one originless placeholder", dns.Config["records"])
+	if !ok || len(records) != 2 || managedMarkerRecord(records) == nil {
+		t.Fatalf("dns records = %#v, want originless placeholder plus managed marker", dns.Config["records"])
 	}
 	if records[0]["type"] != "A" || records[0]["name"] != "@" || records[0]["data"] != "192.0.2.1" || records[0]["proxied"] != true {
 		t.Fatalf("placeholder record = %#v", records[0])
@@ -164,6 +164,63 @@ func TestCompileForwardToProducesCloudflareRedirectResource(t *testing.T) {
 	}
 	if redirect.Config["status_code"] != 301 {
 		t.Fatalf("status_code = %#v", redirect.Config["status_code"])
+	}
+}
+
+func TestCompileAddsManagedByTXTMarker(t *testing.T) {
+	dir := t.TempDir()
+	intentPath := writeTestFile(t, dir, "domains.json", `{
+  "schema": "workflow.domain-intent.v1",
+  "domains": {
+    "example.com": {
+      "registrar": "hover",
+      "dns_host": "cloudflare",
+      "stage_dns": true,
+      "records_policy": "preserve_cloudflare"
+    }
+  }
+}`)
+	portfolioPath := writeTestFile(t, dir, "portfolio.json", `{
+  "schema": "workflow.dns-portfolio.export.v1",
+  "snapshots": [
+    {
+      "id": "cf-example-com",
+      "provider": "cloudflare",
+      "domain": "example.com",
+      "authority": {"name_servers": ["a.ns.cloudflare.com", "b.ns.cloudflare.com"]},
+      "records": [{"type": "A", "name": "@", "value": "192.0.2.10", "ttl": 300}]
+    }
+  ]
+}`)
+
+	bundle, err := Compile(Options{
+		IntentPath:     intentPath,
+		PortfolioGlobs: []string{portfolioPath},
+		StateDir:       ".state/domain-intent-test/",
+	})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	dns := moduleByName(bundle.Config.Modules, "cf-example-com")
+	if dns == nil {
+		t.Fatalf("missing cloudflare DNS module: %+v", bundle.Config.Modules)
+	}
+	records, ok := dns.Config["records"].([]map[string]any)
+	if !ok {
+		t.Fatalf("records = %T, want []map[string]any", dns.Config["records"])
+	}
+	marker := managedMarkerRecord(records)
+	if marker == nil {
+		t.Fatalf("records missing managed marker: %#v", records)
+	}
+	if marker["type"] != "TXT" || marker["name"] != "_workflow-dns-managed" || marker["ttl"] != 300 {
+		t.Fatalf("marker = %#v, want TXT _workflow-dns-managed ttl 300", marker)
+	}
+	data, _ := marker["data"].(string)
+	for _, want := range []string{"heritage=wfinfra-v1", "managed_by=wfctl", "state_dir=.state/domain-intent-test/", "resource=cf-example-com"} {
+		if !strings.Contains(data, want) {
+			t.Fatalf("marker data = %q, missing %q", data, want)
+		}
 	}
 }
 
@@ -300,8 +357,8 @@ func TestCompilePreserveAuthoritativeIgnoresStagedCloudflareByDefault(t *testing
 		t.Fatalf("missing generated Cloudflare module: %+v", bundle.Config.Modules)
 	}
 	records, ok := got.Config["records"].([]map[string]any)
-	if !ok || len(records) != 1 {
-		t.Fatalf("records = %#v, want one authoritative Hover record", got.Config["records"])
+	if !ok || len(records) != 2 || managedMarkerRecord(records) == nil {
+		t.Fatalf("records = %#v, want one authoritative Hover record plus managed marker", got.Config["records"])
 	}
 	if records[0]["data"] != "192.0.2.44" {
 		t.Fatalf("record data = %#v, want authoritative Hover value", records[0]["data"])
@@ -338,6 +395,15 @@ func moduleByName(modules []config.ModuleConfig, name string) *config.ModuleConf
 	for i := range modules {
 		if modules[i].Name == name {
 			return &modules[i]
+		}
+	}
+	return nil
+}
+
+func managedMarkerRecord(records []map[string]any) map[string]any {
+	for _, record := range records {
+		if record["type"] == "TXT" && record["name"] == "_workflow-dns-managed" {
+			return record
 		}
 	}
 	return nil

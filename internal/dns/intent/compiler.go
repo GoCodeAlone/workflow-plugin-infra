@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/GoCodeAlone/workflow-plugin-infra/internal/dns/managedmarker"
 	"github.com/GoCodeAlone/workflow-plugin-infra/internal/dns/record"
 	"github.com/GoCodeAlone/workflow/config"
 )
@@ -126,7 +127,7 @@ func Compile(opts Options) (*Bundle, error) {
 
 	results := make([]compileResult, 0, len(domains))
 	for _, domain := range domains {
-		results = append(results, reconcileDomain(domain, domainMap[domain], snapshots))
+		results = append(results, reconcileDomain(domain, domainMap[domain], snapshots, opts.StateDir))
 	}
 
 	return buildBundle(results, opts.StateDir), nil
@@ -191,7 +192,7 @@ type compileResult struct {
 	modules []config.ModuleConfig
 }
 
-func reconcileDomain(domain string, cfg DomainIntent, snapshots []record.Snapshot) compileResult {
+func reconcileDomain(domain string, cfg DomainIntent, snapshots []record.Snapshot, stateDir string) compileResult {
 	group := snapshotsForDomain(snapshots, domain)
 	cfSnapshot, _ := firstSnapshotByProvider(group, "cloudflare")
 	cfNameservers := normalizeNameservers(stringSliceFromAuthority(cfSnapshot.Authority, "name_servers"))
@@ -251,11 +252,12 @@ func reconcileDomain(domain string, cfg DomainIntent, snapshots []record.Snapsho
 	var modules []config.ModuleConfig
 	if stageDNS(cfg) {
 		resource := resourceName("cf", domain)
+		records := managedmarker.Append(plan.records, stateDir, resource)
 		report.Actions = append(report.Actions, Action{
 			Type:           "stage_dns",
 			Provider:       "cloudflare",
 			Resource:       resource,
-			RecordCount:    intPtr(len(plan.records)),
+			RecordCount:    intPtr(len(records)),
 			ManageUnlisted: boolPtr(plan.manageUnlisted),
 			RecordsPolicy:  recordsPolicy,
 		})
@@ -267,7 +269,7 @@ func reconcileDomain(domain string, cfg DomainIntent, snapshots []record.Snapsho
 				"account_id":      "${CLOUDFLARE_ACCOUNT_ID}",
 				"domain":          domain,
 				"manage_unlisted": plan.manageUnlisted,
-				"records":         plan.records,
+				"records":         records,
 			},
 		})
 	}
