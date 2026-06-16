@@ -31,6 +31,7 @@ func TestRunDNSStageCloudflareWritesConfigAndReport(t *testing.T) {
       "records": [
         {"type": "A", "name": "@", "value": "216.40.34.41", "ttl": 900},
         {"type": "MX", "name": "@", "value": "10 mx.hover.com.cust.hostedemail.com", "ttl": 900},
+        {"type": "TXT", "name": "@", "value": "google-site-verification=abc123", "ttl": 900},
         {"type": "NS", "name": "@", "value": "ns1.hover.com", "ttl": 900}
       ]
     },
@@ -87,8 +88,11 @@ func TestRunDNSStageCloudflareWritesConfigAndReport(t *testing.T) {
 		t.Fatalf("module type = %q, want infra.dns", dns.Type)
 	}
 	records, ok := dns.Config["records"].([]any)
-	if !ok || len(records) != 3 || !hasYAMLManagedMarker(records) {
-		t.Fatalf("records = %#v, want A+MX plus managed marker", dns.Config["records"])
+	if !ok || len(records) != 4 || !hasYAMLManagedMarker(records) {
+		t.Fatalf("records = %#v, want A+MX+TXT plus managed marker", dns.Config["records"])
+	}
+	if !strings.Contains(string(cfgData), `data: '"google-site-verification=abc123"'`) {
+		t.Fatalf("generated TXT YAML is not visibly quoted:\n%s", cfgData)
 	}
 	if blocked := yamlModuleByName(cfg.Modules, "cf-example-net"); blocked != nil {
 		t.Fatalf("safe scope should exclude external authority module: %#v", blocked)

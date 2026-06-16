@@ -353,6 +353,9 @@ func cloudflareRecords(domain string, records []record.Record) []map[string]any 
 		if recType == "CNAME" || recType == "MX" || recType == "NS" || recType == "SRV" {
 			data = strings.TrimSuffix(data, ".")
 		}
+		if recType == "TXT" {
+			data = quoteTXTData(data)
+		}
 		ttl := rec.TTL
 		if ttl == 1 {
 			ttl = 1
@@ -397,6 +400,14 @@ func recordDataAndPriority(rec record.Record) (string, int) {
 		}
 	}
 	return data, priority
+}
+
+func quoteTXTData(data string) string {
+	data = strings.TrimSpace(data)
+	if strings.HasPrefix(data, `"`) && strings.HasSuffix(data, `"`) {
+		return data
+	}
+	return strconv.Quote(data)
 }
 
 func recordKey(item map[string]any) string {
