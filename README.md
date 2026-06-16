@@ -4,7 +4,7 @@
 
 ## Release note — `minEngineVersion`
 
-`plugin.json` declares `"minEngineVersion": "0.80.14"` — the first workflow release that frees the `wfctl dns` namespace for plugin-owned CLI dispatch while retaining the `providerclient.ResourceDriver` apply/create support this plugin's admin surface depends on at runtime. The `dns-policy` compatibility alias also requires a workflow release where `dns-policy` is no longer a reserved core command.
+`plugin.json` declares `"minEngineVersion": "0.80.17"` — the first workflow release that frees both the `wfctl dns` namespace and the `wfctl dns-policy` compatibility alias for plugin-owned CLI dispatch while retaining the `providerclient.ResourceDriver` apply/create support this plugin's admin surface depends on at runtime.
 
 ## What this plugin provides
 

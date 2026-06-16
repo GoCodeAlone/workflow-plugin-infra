@@ -41,8 +41,8 @@ func TestPluginManifestMinEngineVersionMatchesDNSNamespaceRequirement(t *testing
 	if err := json.Unmarshal(data, &manifest); err != nil {
 		t.Fatalf("parse plugin.json: %v", err)
 	}
-	if manifest.MinEngineVersion != "0.80.14" {
-		t.Fatalf("minEngineVersion = %q, want 0.80.14 for plugin-owned dns command dispatch", manifest.MinEngineVersion)
+	if manifest.MinEngineVersion != "0.80.17" {
+		t.Fatalf("minEngineVersion = %q, want 0.80.17 for plugin-owned dns command dispatch", manifest.MinEngineVersion)
 	}
 }
 
