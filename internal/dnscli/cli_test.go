@@ -180,6 +180,160 @@ func TestRunDNSIntentReconcilePlansWithGeneratedConfig(t *testing.T) {
 	}
 }
 
+func TestRunDNSPolicyShowReadsPortfolio(t *testing.T) {
+	dir := t.TempDir()
+	portfolioPath := writeFile(t, dir, "portfolio.json", `{
+  "schema": "workflow.dns-portfolio.export.v1",
+  "snapshots": [
+    {
+      "id": "cf-example-com",
+      "provider": "cloudflare",
+      "domain": "example.com",
+      "records": [
+        {"type": "TXT", "name": "_workflow-dns-policy.example.com", "value": "heritage=wfinfra-v1 o=sre d=true", "ttl": 300}
+      ]
+    }
+  ]
+}`)
+
+	code := New().RunCLI([]string{"dns", "policy", "show",
+		"--portfolio", portfolioPath,
+		"--provider", "cloudflare",
+		"--zone", "example.com",
+		"--raw",
+	})
+	if code != 0 {
+		t.Fatalf("RunCLI dns policy show exit = %d, want 0", code)
+	}
+}
+
+func TestRunDNSPolicyCompatibilityCommandReadsPortfolio(t *testing.T) {
+	dir := t.TempDir()
+	portfolioPath := writeFile(t, dir, "portfolio.json", `{
+  "schema": "workflow.dns-portfolio.export.v1",
+  "snapshots": [
+    {
+      "id": "cf-example-com",
+      "provider": "cloudflare",
+      "domain": "example.com",
+      "records": [
+        {"type": "TXT", "name": "_workflow-dns-policy", "value": "heritage=wfinfra-v1 o=sre d=true", "ttl": 300}
+      ]
+    }
+  ]
+}`)
+
+	code := New().RunCLI([]string{"dns-policy", "show",
+		"--portfolio", portfolioPath,
+		"--config", filepath.Join(dir, "ignored.yaml"),
+		"--provider", "cloudflare",
+		"--zone", "example.com",
+		"--raw",
+	})
+	if code != 0 {
+		t.Fatalf("RunCLI dns-policy show exit = %d, want 0", code)
+	}
+}
+
+func TestRunDNSIntentReconcileApplyFailsClosedWhenPolicyMissing(t *testing.T) {
+	t.Setenv("WORKFLOW_DNS_OWNER", "sre")
+	dir := t.TempDir()
+	intentPath := writeFile(t, dir, "domains.json", `{
+  "schema": "workflow.domain-intent.v1",
+  "domains": {
+    "example.com": {
+      "registrar": "hover",
+      "dns_host": "cloudflare",
+      "stage_dns": true,
+      "records_policy": "preserve_cloudflare"
+    }
+  }
+}`)
+	portfolioPath := writeFile(t, dir, "portfolio.json", `{
+  "schema": "workflow.dns-portfolio.export.v1",
+  "snapshots": [
+    {
+      "id": "cf-example-com",
+      "provider": "cloudflare",
+      "domain": "example.com",
+      "authority": {"name_servers": ["a.ns.cloudflare.com", "b.ns.cloudflare.com"]},
+      "records": [{"type": "A", "name": "@", "value": "192.0.2.10", "ttl": 300}]
+    }
+  ]
+}`)
+	var calls [][]string
+	cli := &CLI{runCommand: func(name string, args ...string) error {
+		calls = append(calls, append([]string{name}, args...))
+		return nil
+	}}
+
+	code := cli.RunCLI([]string{"dns", "intent", "reconcile",
+		"--intent", intentPath,
+		"--portfolio", portfolioPath,
+		"--output", filepath.Join(dir, "out.yaml"),
+		"--report", filepath.Join(dir, "report.json"),
+		"--mode", "apply",
+		"--auto-approve",
+	})
+	if code == 0 {
+		t.Fatal("reconcile apply should fail closed when WORKFLOW_DNS_OWNER is set and no policy exists")
+	}
+	if len(calls) != 0 {
+		t.Fatalf("reconcile ran external commands despite policy failure: %#v", calls)
+	}
+}
+
+func TestRunDNSIntentReconcileApplyPassesPolicyBeforeApply(t *testing.T) {
+	t.Setenv("WORKFLOW_DNS_OWNER", "sre")
+	dir := t.TempDir()
+	intentPath := writeFile(t, dir, "domains.json", `{
+  "schema": "workflow.domain-intent.v1",
+  "domains": {
+    "example.com": {
+      "registrar": "hover",
+      "dns_host": "cloudflare",
+      "stage_dns": true,
+      "records_policy": "preserve_cloudflare"
+    }
+  }
+}`)
+	portfolioPath := writeFile(t, dir, "portfolio.json", `{
+  "schema": "workflow.dns-portfolio.export.v1",
+  "snapshots": [
+    {
+      "id": "cf-example-com",
+      "provider": "cloudflare",
+      "domain": "example.com",
+      "authority": {"name_servers": ["a.ns.cloudflare.com", "b.ns.cloudflare.com"]},
+      "records": [
+        {"type": "TXT", "name": "_workflow-dns-policy.example.com", "value": "heritage=wfinfra-v1 o=sre d=true", "ttl": 300},
+        {"type": "A", "name": "@", "value": "192.0.2.10", "ttl": 300}
+      ]
+    }
+  ]
+}`)
+	var calls [][]string
+	cli := &CLI{runCommand: func(name string, args ...string) error {
+		calls = append(calls, append([]string{name}, args...))
+		return nil
+	}}
+
+	code := cli.RunCLI([]string{"dns", "intent", "reconcile",
+		"--intent", intentPath,
+		"--portfolio", portfolioPath,
+		"--output", filepath.Join(dir, "out.yaml"),
+		"--report", filepath.Join(dir, "report.json"),
+		"--mode", "apply",
+		"--auto-approve",
+	})
+	if code != 0 {
+		t.Fatalf("RunCLI reconcile apply exit = %d, want 0", code)
+	}
+	if len(calls) != 3 {
+		t.Fatalf("runner calls = %#v, want validate/plan/apply", calls)
+	}
+}
+
 func TestRunDNSIntentReconcileApplyVerifiesDelegation(t *testing.T) {
 	dir := t.TempDir()
 	intentPath := writeFile(t, dir, "domains.json", `{

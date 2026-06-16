@@ -66,6 +66,10 @@
             {
                 "name": "dns",
                 "description": "DNS intent orchestration helpers"
+            },
+            {
+                "name": "dns-policy",
+                "description": "Compatibility alias for wfctl dns policy"
             }
         ],
         "triggerTypes": []

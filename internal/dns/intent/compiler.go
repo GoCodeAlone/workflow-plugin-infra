@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/GoCodeAlone/workflow-plugin-infra/internal/dns/managedmarker"
@@ -627,6 +628,7 @@ func parkedHoverRecords(records []record.Record) bool {
 
 func cloudflareRecords(domain string, records []record.Record) []map[string]any {
 	out := make([]map[string]any, 0, len(records))
+	seen := map[string]bool{}
 	for _, rec := range records {
 		recType := strings.ToUpper(rec.Type)
 		if !supportedCloudflareType(recType) {
@@ -637,9 +639,12 @@ func cloudflareRecords(domain string, records []record.Record) []map[string]any 
 		if recType == "NS" && (name == "@" || normalizedName == domain) {
 			continue
 		}
-		data := rec.Value
+		data, priority := recordDataAndPriority(rec)
 		if recType == "CNAME" || recType == "MX" || recType == "NS" || recType == "SRV" {
 			data = strings.TrimSuffix(data, ".")
+		}
+		if recType == "TXT" {
+			data = quoteTXTData(data)
 		}
 		ttl := rec.TTL
 		if ttl == 1 {
@@ -653,12 +658,55 @@ func cloudflareRecords(domain string, records []record.Record) []map[string]any 
 			"data": data,
 			"ttl":  ttl,
 		}
-		if (recType == "MX" || recType == "SRV") && rec.Priority != nil {
-			item["priority"] = *rec.Priority
+		if recType == "MX" || recType == "SRV" {
+			item["priority"] = priority
 		}
+		key := recordKey(item)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
 		out = append(out, item)
 	}
+	sort.SliceStable(out, func(i, j int) bool {
+		return recordKey(out[i]) < recordKey(out[j])
+	})
 	return out
+}
+
+func recordDataAndPriority(rec record.Record) (string, int) {
+	data := rec.Value
+	priority := 0
+	if rec.Priority != nil {
+		priority = *rec.Priority
+		return data, priority
+	}
+	if strings.EqualFold(rec.Type, "MX") {
+		fields := strings.Fields(data)
+		if len(fields) >= 2 {
+			if parsed, err := strconv.Atoi(fields[0]); err == nil {
+				return strings.Join(fields[1:], " "), parsed
+			}
+		}
+	}
+	return data, priority
+}
+
+func quoteTXTData(data string) string {
+	trimmed := strings.TrimSpace(data)
+	if strings.HasPrefix(trimmed, `"`) && strings.HasSuffix(trimmed, `"`) {
+		return data
+	}
+	return strconv.Quote(data)
+}
+
+func recordKey(item map[string]any) string {
+	return strings.Join([]string{
+		strings.ToLower(fmt.Sprint(item["type"])),
+		strings.ToLower(fmt.Sprint(item["name"])),
+		strings.ToLower(fmt.Sprint(item["data"])),
+		fmt.Sprint(item["priority"]),
+	}, "\x00")
 }
 
 func supportedCloudflareType(recType string) bool {

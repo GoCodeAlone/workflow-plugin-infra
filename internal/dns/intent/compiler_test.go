@@ -365,6 +365,76 @@ func TestCompilePreserveAuthoritativeIgnoresStagedCloudflareByDefault(t *testing
 	}
 }
 
+func TestCompilePreserveAuthoritativeNormalizesCloudflareRecords(t *testing.T) {
+	dir := t.TempDir()
+	intentPath := writeTestFile(t, dir, "domains.json", `{
+  "schema": "workflow.domain-intent.v1",
+  "domains": {
+    "example.com": {
+      "registrar": "hover",
+      "dns_host": "cloudflare",
+      "stage_dns": true
+    }
+  }
+}`)
+	portfolioPath := writeTestFile(t, dir, "portfolio.json", `{
+  "schema": "workflow.dns-portfolio.export.v1",
+  "snapshots": [
+    {
+      "id": "cf",
+      "provider": "cloudflare",
+      "domain": "example.com",
+      "authority": {"name_servers": ["a.ns.cloudflare.com", "b.ns.cloudflare.com"]},
+      "records": []
+    },
+    {
+      "id": "hover",
+      "provider": "hover",
+      "domain": "example.com",
+      "authority": {"registrar_nameservers": ["ns1.hover.com", "ns2.hover.com"]},
+      "records": [
+        {"type": "TXT", "name": "@", "value": "google-site-verification=abc123", "ttl": 900},
+        {"type": "TXT", "name": "@", "value": "google-site-verification=abc123", "ttl": 900},
+        {"type": "MX", "name": "@", "value": "10 mx.example.com.", "ttl": 900}
+      ]
+    }
+  ]
+}`)
+
+	bundle, err := Compile(Options{IntentPath: intentPath, PortfolioGlobs: []string{portfolioPath}})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	got := moduleByName(bundle.Config.Modules, "cf-example-com")
+	if got == nil {
+		t.Fatalf("missing generated Cloudflare module: %+v", bundle.Config.Modules)
+	}
+	records, ok := got.Config["records"].([]map[string]any)
+	if !ok {
+		t.Fatalf("records = %T, want []map[string]any", got.Config["records"])
+	}
+	var txt, mx map[string]any
+	for _, rec := range records {
+		switch rec["type"] {
+		case "TXT":
+			if rec["name"] == "@" {
+				if txt != nil {
+					t.Fatalf("duplicate TXT record emitted: %#v", records)
+				}
+				txt = rec
+			}
+		case "MX":
+			mx = rec
+		}
+	}
+	if txt == nil || txt["data"] != `"google-site-verification=abc123"` {
+		t.Fatalf("TXT record = %#v, want quoted data", txt)
+	}
+	if mx == nil || mx["data"] != "mx.example.com" || mx["priority"] != 10 {
+		t.Fatalf("MX record = %#v, want parsed priority and trimmed target", mx)
+	}
+}
+
 func TestCurrentAuthorityProviderIsOrderIndependent(t *testing.T) {
 	group := []record.Snapshot{
 		{

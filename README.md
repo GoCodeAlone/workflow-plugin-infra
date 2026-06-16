@@ -4,7 +4,7 @@
 
 ## Release note — `minEngineVersion`
 
-`plugin.json` declares `"minEngineVersion": "0.80.14"` — the first workflow release that frees the `wfctl dns` namespace for plugin-owned CLI dispatch while retaining the `providerclient.ResourceDriver` apply/create support this plugin's admin surface depends on at runtime.
+`plugin.json` declares `"minEngineVersion": "0.80.14"` — the first workflow release that frees the `wfctl dns` namespace for plugin-owned CLI dispatch while retaining the `providerclient.ResourceDriver` apply/create support this plugin's admin surface depends on at runtime. The `dns-policy` compatibility alias also requires a workflow release where `dns-policy` is no longer a reserved core command.
 
 ## What this plugin provides
 
@@ -19,10 +19,17 @@ Per-provider DNS support lives in the respective provider plugins (workflow-plug
 - `wfctl dns stage cloudflare` — compile Cloudflare `infra.dns` staging config and an audit report directly from DNS portfolio exports
 - `wfctl infra import-all --provider <m> --type infra.dns` — bulk import every zone an account holds, via the provider's `IaCProviderEnumerator`
 
-Cross-cutting DNS policy and apply gates remain in wfctl core because `wfctl infra apply` owns that lifecycle hook:
+Cross-provider DNS policy orchestration lives with this plugin:
 
-- `wfctl dns-policy {show,set,transfer-ownership,drift}` — manage the `_workflow-dns-policy.<zone>` TXT policy across any provider implementing `infra.dns`
-- `wfctl infra apply` — enforces the DNS ownership gate as a pre-action hook for `infra.dns` resources
+- `wfctl dns policy show` — inspect `_workflow-dns-policy.<zone>` TXT policy from portfolio exports
+- `wfctl dns policy check` — check generated `infra.dns` config against portfolio policy before apply
+- `wfctl dns-policy show` — compatibility alias for existing operator workflows, dispatched through the plugin command registry
+
+`wfctl dns intent reconcile --mode apply` runs the same policy check before it
+calls generic `wfctl infra apply`. When `WORKFLOW_DNS_OWNER` is set, missing
+policy fails closed. When it is unset, reconcile logs a warning and skips the
+policy check, matching the old adoption behavior while keeping generic
+`wfctl infra apply` free of DNS-specific lifecycle hooks.
 
 The previous per-provider DNS adapter pages (`docs/providers/*.md`) and the `infra.dns_record` step type were removed in v1.0.0; the legacy step's peer-dispatch model was architecturally unsupported (see `docs/plans/2026-05-26-dns-provider-contract-design.md`).
 

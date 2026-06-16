@@ -42,6 +42,9 @@ func (c *CLI) RunCLI(args []string) int {
 }
 
 func (c *CLI) run(args []string) error {
+	if len(args) >= 1 && args[0] == "dns-policy" {
+		return c.runDNSPolicy(args[1:])
+	}
 	if len(args) < 1 || args[0] != "dns" {
 		return fmt.Errorf("usage: wfctl dns <subcommand> [flags]")
 	}
@@ -55,6 +58,8 @@ func (c *CLI) runDNS(args []string) error {
 	switch args[0] {
 	case "intent":
 		return c.runDNSIntent(args[1:])
+	case "policy":
+		return c.runDNSPolicy(args[1:])
 	case "stage":
 		return c.runDNSStage(args[1:])
 	case "-h", "--help", "help":
@@ -71,9 +76,41 @@ DNS orchestration helpers.
 
 Subcommands:
   intent   Compile and reconcile domain intent into infra resources
+  policy   Inspect and check DNS ownership policy from portfolios
   stage    Compile provider staging resources from DNS portfolios
 `)
 	return fmt.Errorf("missing or unknown subcommand")
+}
+
+func (c *CLI) runDNSPolicy(args []string) error {
+	if len(args) < 1 {
+		return dnsPolicyUsage()
+	}
+	switch args[0] {
+	case "show":
+		return c.runDNSPolicyShow(args[1:])
+	case "check":
+		return c.runDNSPolicyCheck(args[1:])
+	case "-h", "--help", "help":
+		return dnsPolicyUsageHelp()
+	default:
+		return fmt.Errorf("dns policy: unknown subcommand %q", args[0])
+	}
+}
+
+func dnsPolicyUsage() error {
+	fmt.Fprint(os.Stderr, `Usage: wfctl dns policy <subcommand> [flags]
+
+Subcommands:
+  show    Show parsed _workflow-dns-policy TXT from DNS portfolio exports
+  check   Check generated infra.dns config against portfolio policy
+`)
+	return fmt.Errorf("missing or unknown subcommand")
+}
+
+func dnsPolicyUsageHelp() error {
+	_ = dnsPolicyUsage()
+	return flag.ErrHelp
 }
 
 func dnsUsageHelp() error {
@@ -221,6 +258,11 @@ func (c *CLI) runDNSIntentReconcile(args []string) error {
 	}
 	if bundle.Report.ActionCount == 0 && !opts.allowEmpty {
 		return fmt.Errorf("domain intent produced no actions; use --allow-empty to accept a no-op")
+	}
+	if opts.mode == "apply" {
+		if err := enforceIntentDNSPolicy(bundle, opts.compileOptions, os.Getenv("WORKFLOW_DNS_OWNER")); err != nil {
+			return err
+		}
 	}
 	validateArgs := []string{"validate", "--allow-no-entry-points"}
 	if opts.pluginDir != "" {

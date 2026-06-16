@@ -173,5 +173,5 @@ message CertificateConfig {
 // in v1.0.0 (Phase 3b). The infra.dns_record step type was deleted because
 // peer-dispatch from a step-handler context is architecturally unsupported
 // (cycle 3.5 I-NEW-1). Per-record DNS workflows route through
-// `wfctl infra apply` (config-declared records) or `wfctl dns-policy *`
-// (policy edits) against any provider-plugin that implements infra.dns.
+// `wfctl infra apply` (config-declared records) or plugin-owned
+// `wfctl dns policy *` checks against provider-plugin portfolio data.

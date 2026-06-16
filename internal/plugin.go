@@ -159,7 +159,7 @@ func typedModuleFactory[C proto.Message](typeName string, configPrototype C) *sd
 // StepTypes returns the step type names this plugin provides. Phase 3b
 // removed the infra.dns_record step — per-record DNS workflows now route
 // through `wfctl infra apply` (config-declared records) or
-// `wfctl dns-policy *` (policy edits). See design doc cycle 3.5 I-NEW-1:
+// plugin-owned `wfctl dns policy *` (policy checks). See design doc cycle 3.5 I-NEW-1:
 // step-handler peer-dispatch was architecturally unsupported.
 func (p *infraPlugin) StepTypes() []string {
 	return nil
@@ -213,7 +213,7 @@ func buildContractRegistry(definitions []infraModuleDefinition) *pb.ContractRegi
 	})
 	// No step contracts post-Phase-3b: infra.dns_record removed (peer-dispatch
 	// from step-handler context infeasible; per-record workflows route through
-	// wfctl infra apply or wfctl dns-policy * instead).
+	// wfctl infra apply or plugin-owned wfctl dns policy * instead).
 	return &pb.ContractRegistry{
 		FileDescriptorSet: &descriptorpb.FileDescriptorSet{
 			File: []*descriptorpb.FileDescriptorProto{
