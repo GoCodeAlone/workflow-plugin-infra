@@ -7,9 +7,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/GoCodeAlone/workflow-plugin-infra/internal/dns/intent"
+	"github.com/GoCodeAlone/workflow-plugin-infra/internal/dns/record"
 	"github.com/GoCodeAlone/workflow-plugin-infra/internal/dns/stage"
 	"gopkg.in/yaml.v3"
 )
@@ -208,6 +210,9 @@ func (c *CLI) runDNSIntentReconcile(args []string) error {
 	if err != nil {
 		return err
 	}
+	if bundle.Report.BlockedDomains > 0 {
+		return fmt.Errorf("%d domain(s) blocked", bundle.Report.BlockedDomains)
+	}
 	if bundle.Report.ActionCount == 0 && !opts.allowEmpty {
 		return fmt.Errorf("domain intent produced no actions; use --allow-empty to accept a no-op")
 	}
@@ -218,6 +223,11 @@ func (c *CLI) runDNSIntentReconcile(args []string) error {
 	validateArgs = append(validateArgs, opts.outputPath)
 	if err := c.runCommand(wfctlBinary(), validateArgs...); err != nil {
 		return fmt.Errorf("validate generated domain intent config: %w", err)
+	}
+	if opts.mode == "apply" && opts.verifyDelegation {
+		if err := c.verifyDelegation(bundle.Report, opts, "before"); err != nil {
+			return err
+		}
 	}
 	planArgs := []string{"infra", "plan", "--config", opts.outputPath}
 	if opts.pluginDir != "" {
@@ -239,6 +249,11 @@ func (c *CLI) runDNSIntentReconcile(args []string) error {
 	if err := c.runCommand(wfctlBinary(), applyArgs...); err != nil {
 		return fmt.Errorf("apply domain intent: %w", err)
 	}
+	if opts.verifyDelegation {
+		if err := c.verifyDelegation(bundle.Report, opts, "after"); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -259,6 +274,11 @@ type reconcileOptions struct {
 	mode        string
 	autoApprove bool
 	allowEmpty  bool
+
+	verifyDelegation     bool
+	delegationConfigDir  string
+	delegationBeforePath string
+	delegationAfterPath  string
 }
 
 type stageCloudflareOptions struct {
@@ -305,6 +325,10 @@ func parseReconcileOptions(args []string) (reconcileOptions, error) {
 	fs.StringVar(&opts.mode, "mode", "plan", "Reconcile mode: plan or apply")
 	fs.BoolVar(&opts.autoApprove, "auto-approve", false, "Pass --auto-approve to infra apply (required with --mode apply)")
 	fs.BoolVar(&opts.allowEmpty, "allow-empty", false, "Allow intent with zero generated actions")
+	fs.BoolVar(&opts.verifyDelegation, "verify-delegation", false, "For apply mode, import registrar delegation before and after apply and verify expected/desired nameservers")
+	fs.StringVar(&opts.delegationConfigDir, "delegation-config-dir", "infra", "Directory containing <provider>.wfctl.yaml configs for delegation verification imports")
+	fs.StringVar(&opts.delegationBeforePath, "delegation-before-output", "reports/domain-reconcile-delegation-before.json", "Registrar delegation portfolio output before apply")
+	fs.StringVar(&opts.delegationAfterPath, "delegation-after-output", "reports/domain-reconcile-delegation-after.json", "Registrar delegation portfolio output after apply")
 	if err := fs.Parse(args); err != nil {
 		return opts, err
 	}
@@ -331,6 +355,180 @@ func parseStageCloudflareOptions(args []string) (stageCloudflareOptions, error) 
 		return opts, fmt.Errorf("dns stage cloudflare: unexpected positional argument(s): %s", strings.Join(fs.Args(), " "))
 	}
 	return opts, nil
+}
+
+func (c *CLI) verifyDelegation(report intent.Report, opts reconcileOptions, phase string) error {
+	providers := delegationProviders(report)
+	if len(providers) == 0 {
+		fmt.Fprintf(os.Stderr, "No registrar delegation actions; skipping %s delegation verification.\n", phase)
+		return nil
+	}
+	sort.Strings(providers)
+	multipleProviders := len(providers) > 1
+	for _, provider := range providers {
+		outputPath := opts.delegationBeforePath
+		if phase == "after" {
+			outputPath = opts.delegationAfterPath
+		}
+		outputPath = providerOutputPath(outputPath, provider, multipleProviders)
+		args := []string{
+			"infra", "import-all",
+			"--config", filepath.Join(opts.delegationConfigDir, provider+".wfctl.yaml"),
+			"--provider", provider,
+			"--type", "infra.dns_delegation",
+			"--format", "portfolio",
+		}
+		if opts.pluginDir != "" {
+			args = append(args, "--plugin-dir", opts.pluginDir)
+		}
+		args = append(args, "-o", outputPath)
+		if err := c.runCommand(wfctlBinary(), args...); err != nil {
+			return fmt.Errorf("import %s registrar delegation for %s: %w", phase, provider, err)
+		}
+		portfolio, err := loadDelegationPortfolio(outputPath)
+		if err != nil {
+			return err
+		}
+		if err := verifyDelegationPortfolio(report, provider, portfolio, phase); err != nil {
+			return err
+		}
+	}
+	fmt.Fprintf(os.Stderr, "Registrar delegation %s verification matched intent.\n", phase)
+	return nil
+}
+
+func delegationProviders(report intent.Report) []string {
+	seen := map[string]bool{}
+	for _, domain := range report.Domains {
+		for _, action := range domain.Actions {
+			if action.Type == "set_nameservers" && action.Provider != "" {
+				seen[action.Provider] = true
+			}
+		}
+	}
+	providers := make([]string, 0, len(seen))
+	for provider := range seen {
+		providers = append(providers, provider)
+	}
+	return providers
+}
+
+func providerOutputPath(path, provider string, multipleProviders bool) string {
+	if !multipleProviders || path == "" || path == "-" {
+		return path
+	}
+	ext := filepath.Ext(path)
+	base := strings.TrimSuffix(path, ext)
+	return base + "-" + provider + ext
+}
+
+func loadDelegationPortfolio(path string) (*record.Portfolio, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read delegation import %q: %w", path, err)
+	}
+	var portfolio record.Portfolio
+	if err := json.Unmarshal(data, &portfolio); err != nil {
+		return nil, fmt.Errorf("parse delegation import %q: %w", path, err)
+	}
+	if err := portfolio.Validate(); err != nil {
+		return nil, fmt.Errorf("delegation import %q: %w", path, err)
+	}
+	return &portfolio, nil
+}
+
+func verifyDelegationPortfolio(report intent.Report, provider string, portfolio *record.Portfolio, phase string) error {
+	for _, domain := range report.Domains {
+		for _, action := range domain.Actions {
+			if action.Type != "set_nameservers" || action.Provider != provider {
+				continue
+			}
+			want := action.ExpectedCurrentNameservers
+			if phase == "after" {
+				want = action.DesiredNameservers
+			}
+			if len(want) == 0 {
+				continue
+			}
+			got, ok := portfolioNameservers(portfolio, domain.Domain)
+			if !ok {
+				return fmt.Errorf("%s missing from %s registrar delegation import for %s", domain.Domain, phase, provider)
+			}
+			want = normalizeNameserverSet(want)
+			if !equalStringSlices(got, want) {
+				return fmt.Errorf("%s %s registrar nameservers %q did not match expected %q", domain.Domain, phase, strings.Join(got, ","), strings.Join(want, ","))
+			}
+		}
+	}
+	return nil
+}
+
+func portfolioNameservers(portfolio *record.Portfolio, domain string) ([]string, bool) {
+	normalizedDomain := normalizeDomainName(domain)
+	for _, snapshot := range portfolio.Snapshots {
+		if normalizeDomainName(snapshot.Domain) != normalizedDomain {
+			continue
+		}
+		ns := nameserversFromAuthority(snapshot.Authority, "registrar_nameservers")
+		if len(ns) == 0 {
+			ns = nameserversFromAuthority(snapshot.Authority, "live_nameservers")
+		}
+		ns = normalizeNameserverSet(ns)
+		return ns, len(ns) > 0
+	}
+	return nil, false
+}
+
+func nameserversFromAuthority(authority map[string]any, key string) []string {
+	if authority == nil {
+		return nil
+	}
+	switch value := authority[key].(type) {
+	case []string:
+		return append([]string(nil), value...)
+	case []any:
+		out := make([]string, 0, len(value))
+		for _, item := range value {
+			if s, ok := item.(string); ok {
+				out = append(out, s)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+func normalizeNameserverSet(values []string) []string {
+	seen := map[string]bool{}
+	for _, value := range values {
+		normalized := normalizeDomainName(value)
+		if normalized != "" {
+			seen[normalized] = true
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for value := range seen {
+		out = append(out, value)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func normalizeDomainName(value string) string {
+	return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(value)), ".")
+}
+
+func equalStringSlices(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func compileDNSIntentBundle(opts compileOptions) (*intent.Bundle, error) {
