@@ -294,6 +294,116 @@ func TestRunDNSIntentReconcileApplyVerifiesDelegation(t *testing.T) {
 	}
 }
 
+func TestRunDNSIntentReconcileApplyVerifiesLiveDelegation(t *testing.T) {
+	dir := t.TempDir()
+	intentPath := writeFile(t, dir, "domains.json", `{
+  "schema": "workflow.domain-intent.v1",
+  "domains": {
+    "example.com": {
+      "registrar": "hover",
+      "dns_host": "cloudflare",
+      "stage_dns": false,
+      "nameserver_cutover": true
+    }
+  }
+}`)
+	portfolioPath := writeFile(t, dir, "portfolio.json", `{
+  "schema": "workflow.dns-portfolio.export.v1",
+  "snapshots": [
+    {
+      "id": "cf-example-com",
+      "provider": "cloudflare",
+      "domain": "example.com",
+      "authority": {"name_servers": ["Amos.NS.Cloudflare.com.", "mckinley.ns.cloudflare.com"]}
+    },
+    {
+      "id": "hover-example-com",
+      "provider": "hover",
+      "domain": "example.com",
+      "authority": {"registrar_nameservers": ["ns1.hover.com", "ns2.hover.com"]}
+    }
+  ]
+}`)
+	var calls [][]string
+	cli := &CLI{
+		runCommand: func(name string, args ...string) error {
+			calls = append(calls, append([]string{name}, args...))
+			return nil
+		},
+		lookupNameservers: func(domain string) ([]string, error) {
+			if domain != "example.com" {
+				t.Fatalf("lookup domain = %q, want example.com", domain)
+			}
+			return []string{"mckinley.ns.cloudflare.com.", "amos.ns.cloudflare.com."}, nil
+		},
+	}
+
+	code := cli.RunCLI([]string{"dns", "intent", "reconcile",
+		"--intent", intentPath,
+		"--portfolio", portfolioPath,
+		"--output", filepath.Join(dir, "out.yaml"),
+		"--report", filepath.Join(dir, "report.json"),
+		"--plan-output", filepath.Join(dir, "plan.json"),
+		"--mode", "apply",
+		"--auto-approve",
+		"--verify-live-delegation",
+	})
+	if code != 0 {
+		t.Fatalf("RunCLI reconcile apply exit = %d, want 0", code)
+	}
+	if len(calls) != 3 {
+		t.Fatalf("runner calls = %#v, want validate/plan/apply only", calls)
+	}
+}
+
+func TestRunDNSIntentReconcileApplyFailsLiveDelegationMismatch(t *testing.T) {
+	dir := t.TempDir()
+	intentPath := writeFile(t, dir, "domains.json", `{
+  "schema": "workflow.domain-intent.v1",
+  "domains": {
+    "example.com": {
+      "registrar": "hover",
+      "dns_host": "cloudflare",
+      "stage_dns": false,
+      "nameserver_cutover": true
+    }
+  }
+}`)
+	portfolioPath := writeFile(t, dir, "portfolio.json", `{
+  "schema": "workflow.dns-portfolio.export.v1",
+  "snapshots": [
+    {
+      "id": "cf-example-com",
+      "provider": "cloudflare",
+      "domain": "example.com",
+      "authority": {"name_servers": ["amos.ns.cloudflare.com", "mckinley.ns.cloudflare.com"]}
+    }
+  ]
+}`)
+	cli := &CLI{
+		runCommand: func(_ string, _ ...string) error {
+			return nil
+		},
+		lookupNameservers: func(_ string) ([]string, error) {
+			return []string{"ns1.hover.com", "ns2.hover.com"}, nil
+		},
+	}
+
+	code := cli.RunCLI([]string{"dns", "intent", "reconcile",
+		"--intent", intentPath,
+		"--portfolio", portfolioPath,
+		"--output", filepath.Join(dir, "out.yaml"),
+		"--report", filepath.Join(dir, "report.json"),
+		"--plan-output", filepath.Join(dir, "plan.json"),
+		"--mode", "apply",
+		"--auto-approve",
+		"--verify-live-delegation",
+	})
+	if code == 0 {
+		t.Fatal("reconcile should fail when live nameservers do not match desired")
+	}
+}
+
 func TestRunDNSIntentReconcileApplyRequiresAutoApprove(t *testing.T) {
 	code := New().RunCLI([]string{"dns", "intent", "reconcile", "--mode", "apply"})
 	if code == 0 {
