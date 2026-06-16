@@ -15,7 +15,7 @@ Abstract `infra.*` module types (13 total: `container_service`, `k8s_cluster`, `
 Per-provider DNS support lives in the respective provider plugins (workflow-plugin-{digitalocean,cloudflare,namecheap,hover,...}), each implementing `infra.dns` against its native SDK. Capability-scoped DNS orchestration is exposed by this plugin as a top-level wfctl command:
 
 - `wfctl dns intent compile` — compile domain intent JSON plus DNS portfolio exports into generated `infra.dns` / `infra.dns_delegation` config and a report
-- `wfctl dns intent reconcile` — compile, validate, optionally verify live registrar delegation, and run `wfctl infra plan` / `wfctl infra apply` for that generated config
+- `wfctl dns intent reconcile` — compile, validate, optionally verify registrar and public DNS delegation, and run `wfctl infra plan` / `wfctl infra apply` for that generated config
 - `wfctl dns stage cloudflare` — compile Cloudflare `infra.dns` staging config and an audit report directly from DNS portfolio exports
 - `wfctl infra import-all --provider <m> --type infra.dns` — bulk import every zone an account holds, via the provider's `IaCProviderEnumerator`
 
@@ -56,7 +56,9 @@ For registrar cutovers, use `wfctl dns intent reconcile` instead of repository
 scripts. With `--verify-delegation`, apply mode imports registrar
 `infra.dns_delegation` snapshots before apply, checks any
 `expected_current_nameservers`, applies the generated resources, then imports
-again and verifies the desired nameservers:
+again and verifies the registrar API reports the desired nameservers.
+Add `--verify-live-delegation` when the run should also wait for public DNS
+lookups to return the desired nameservers after the registrar write:
 
 ```sh
 wfctl dns intent reconcile \
@@ -66,6 +68,9 @@ wfctl dns intent reconcile \
   --mode apply \
   --auto-approve \
   --verify-delegation \
+  --verify-live-delegation \
+  --live-delegation-timeout 10m \
+  --live-delegation-interval 30s \
   --delegation-config-dir infra \
   --plugin-dir data/plugins
 ```

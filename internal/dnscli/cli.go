@@ -4,11 +4,13 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/GoCodeAlone/workflow-plugin-infra/internal/dns/intent"
 	"github.com/GoCodeAlone/workflow-plugin-infra/internal/dns/record"
@@ -17,11 +19,15 @@ import (
 )
 
 type CLI struct {
-	runCommand func(name string, args ...string) error
+	runCommand        func(name string, args ...string) error
+	lookupNameservers func(domain string) ([]string, error)
 }
 
 func New() *CLI {
-	return &CLI{runCommand: runExternalCommand}
+	return &CLI{
+		runCommand:        runExternalCommand,
+		lookupNameservers: lookupLiveNameservers,
+	}
 }
 
 func (c *CLI) RunCLI(args []string) int {
@@ -254,6 +260,11 @@ func (c *CLI) runDNSIntentReconcile(args []string) error {
 			return err
 		}
 	}
+	if opts.verifyLiveDelegation {
+		if err := c.verifyLiveDelegation(bundle.Report, opts); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -276,9 +287,12 @@ type reconcileOptions struct {
 	allowEmpty  bool
 
 	verifyDelegation     bool
+	verifyLiveDelegation bool
 	delegationConfigDir  string
 	delegationBeforePath string
 	delegationAfterPath  string
+	liveDelegationWait   time.Duration
+	liveDelegationEvery  time.Duration
 }
 
 type stageCloudflareOptions struct {
@@ -326,11 +340,17 @@ func parseReconcileOptions(args []string) (reconcileOptions, error) {
 	fs.BoolVar(&opts.autoApprove, "auto-approve", false, "Pass --auto-approve to infra apply (required with --mode apply)")
 	fs.BoolVar(&opts.allowEmpty, "allow-empty", false, "Allow intent with zero generated actions")
 	fs.BoolVar(&opts.verifyDelegation, "verify-delegation", false, "For apply mode, import registrar delegation before and after apply and verify expected/desired nameservers")
+	fs.BoolVar(&opts.verifyLiveDelegation, "verify-live-delegation", false, "For apply mode, verify public DNS nameservers match desired nameservers after apply")
 	fs.StringVar(&opts.delegationConfigDir, "delegation-config-dir", "infra", "Directory containing <provider>.wfctl.yaml configs for delegation verification imports")
 	fs.StringVar(&opts.delegationBeforePath, "delegation-before-output", "reports/domain-reconcile-delegation-before.json", "Registrar delegation portfolio output before apply")
 	fs.StringVar(&opts.delegationAfterPath, "delegation-after-output", "reports/domain-reconcile-delegation-after.json", "Registrar delegation portfolio output after apply")
+	fs.DurationVar(&opts.liveDelegationWait, "live-delegation-timeout", 0, "Maximum time to wait for public DNS nameservers to match when --verify-live-delegation is set")
+	fs.DurationVar(&opts.liveDelegationEvery, "live-delegation-interval", 30*time.Second, "Polling interval for --verify-live-delegation")
 	if err := fs.Parse(args); err != nil {
 		return opts, err
+	}
+	if opts.liveDelegationEvery <= 0 {
+		return opts, fmt.Errorf("dns intent reconcile: --live-delegation-interval must be positive")
 	}
 	if fs.NArg() > 0 {
 		return opts, fmt.Errorf("dns intent reconcile: unexpected positional argument(s): %s", strings.Join(fs.Args(), " "))
@@ -395,6 +415,68 @@ func (c *CLI) verifyDelegation(report intent.Report, opts reconcileOptions, phas
 	}
 	fmt.Fprintf(os.Stderr, "Registrar delegation %s verification matched intent.\n", phase)
 	return nil
+}
+
+func (c *CLI) verifyLiveDelegation(report intent.Report, opts reconcileOptions) error {
+	targets := liveDelegationTargets(report)
+	if len(targets) == 0 {
+		fmt.Fprintln(os.Stderr, "No nameserver cutover actions; skipping live delegation verification.")
+		return nil
+	}
+	deadline := time.Now().Add(opts.liveDelegationWait)
+	for {
+		var mismatches []string
+		for domain, want := range targets {
+			got, err := c.lookupNameservers(domain)
+			if err != nil {
+				mismatches = append(mismatches, fmt.Sprintf("%s lookup failed: %v", domain, err))
+				continue
+			}
+			got = normalizeNameserverSet(got)
+			if !equalStringSlices(got, want) {
+				mismatches = append(mismatches, fmt.Sprintf("%s live nameservers %q did not match desired %q", domain, strings.Join(got, ","), strings.Join(want, ",")))
+			}
+		}
+		if len(mismatches) == 0 {
+			fmt.Fprintln(os.Stderr, "Live delegation verification matched intent.")
+			return nil
+		}
+		if opts.liveDelegationWait <= 0 || time.Now().Add(opts.liveDelegationEvery).After(deadline) {
+			return fmt.Errorf("live delegation verification failed: %s", strings.Join(mismatches, "; "))
+		}
+		fmt.Fprintf(os.Stderr, "Waiting for live delegation to match intent: %s\n", strings.Join(mismatches, "; "))
+		time.Sleep(opts.liveDelegationEvery)
+	}
+}
+
+func liveDelegationTargets(report intent.Report) map[string][]string {
+	targets := map[string][]string{}
+	for _, domain := range report.Domains {
+		for _, action := range domain.Actions {
+			if action.Type != "set_nameservers" {
+				continue
+			}
+			want := normalizeNameserverSet(action.DesiredNameservers)
+			if len(want) > 0 {
+				targets[domain.Domain] = want
+			}
+		}
+	}
+	return targets
+}
+
+func lookupLiveNameservers(domain string) ([]string, error) {
+	records, err := net.LookupNS(domain)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(records))
+	for _, record := range records {
+		if record != nil {
+			out = append(out, record.Host)
+		}
+	}
+	return out, nil
 }
 
 func delegationProviders(report intent.Report) []string {
