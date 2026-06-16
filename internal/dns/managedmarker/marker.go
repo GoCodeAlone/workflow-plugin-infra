@@ -13,7 +13,12 @@ const (
 
 func Append(records []map[string]any, stateDir, resource string) []map[string]any {
 	out := make([]map[string]any, 0, len(records)+1)
-	out = append(out, records...)
+	for _, record := range records {
+		if isMarker(record) {
+			continue
+		}
+		out = append(out, record)
+	}
 	out = append(out, Record(stateDir, resource))
 	return out
 }
@@ -35,4 +40,10 @@ func field(value string) string {
 	value = strings.TrimSpace(value)
 	value = strings.ReplaceAll(value, `"`, "")
 	return value
+}
+
+func isMarker(record map[string]any) bool {
+	recordType, _ := record["type"].(string)
+	name, _ := record["name"].(string)
+	return strings.EqualFold(recordType, Type) && strings.EqualFold(strings.TrimSuffix(name, "."), Name)
 }
