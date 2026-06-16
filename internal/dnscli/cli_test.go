@@ -87,8 +87,8 @@ func TestRunDNSStageCloudflareWritesConfigAndReport(t *testing.T) {
 		t.Fatalf("module type = %q, want infra.dns", dns.Type)
 	}
 	records, ok := dns.Config["records"].([]any)
-	if !ok || len(records) != 2 {
-		t.Fatalf("records = %#v, want A+MX only", dns.Config["records"])
+	if !ok || len(records) != 3 || !hasYAMLManagedMarker(records) {
+		t.Fatalf("records = %#v, want A+MX plus managed marker", dns.Config["records"])
 	}
 	if blocked := yamlModuleByName(cfg.Modules, "cf-example-net"); blocked != nil {
 		t.Fatalf("safe scope should exclude external authority module: %#v", blocked)
@@ -442,8 +442,8 @@ func TestRunCLIIntentCompileWritesConfigAndReport(t *testing.T) {
 			t.Fatalf("dns module type = %q", module.Type)
 		}
 		records, ok := module.Config["records"].([]any)
-		if !ok || len(records) != 1 {
-			t.Fatalf("records = %#v, want one record", module.Config["records"])
+		if !ok || len(records) != 2 || !hasYAMLManagedMarker(records) {
+			t.Fatalf("records = %#v, want one record plus managed marker", module.Config["records"])
 		}
 		rec, ok := records[0].(map[string]any)
 		if !ok || rec["ttl"] != 60 {
@@ -552,4 +552,14 @@ func yamlModuleByName(modules []yamlTestModule, name string) *yamlTestModule {
 		}
 	}
 	return nil
+}
+
+func hasYAMLManagedMarker(records []any) bool {
+	for _, raw := range records {
+		record, ok := raw.(map[string]any)
+		if ok && record["type"] == "TXT" && record["name"] == "_workflow-dns-managed" {
+			return true
+		}
+	}
+	return false
 }

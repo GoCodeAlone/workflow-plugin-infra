@@ -34,6 +34,12 @@ Cloudflare DNS. The compiler emits:
 - a Cloudflare `infra.http_redirect` resource targeting `forward_to`, preserving
   path and query string by default.
 
+Generated Cloudflare DNS resources include a TXT marker at
+`_workflow-dns-managed.<zone>` with `heritage=wfinfra-v1`, `managed_by=wfctl`,
+the generated state directory, and the resource name. This marker is not the
+ownership-policy gate; it is a zone-visible breadcrumb that helps detect when a
+zone may already be managed by another wfctl state surface.
+
 Cloudflare staging uses committed DNS portfolio exports as input and emits
 ordinary IaC resources; provider plugins still own the actual Cloudflare API
 calls through `wfctl infra plan/apply`:

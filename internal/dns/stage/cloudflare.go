@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/GoCodeAlone/workflow-plugin-infra/internal/dns/managedmarker"
 	"github.com/GoCodeAlone/workflow-plugin-infra/internal/dns/record"
 	"github.com/GoCodeAlone/workflow/config"
 )
@@ -87,7 +88,7 @@ func CompileCloudflare(opts CloudflareOptions) (*CloudflareBundle, error) {
 	all := make([]stagedDomain, 0, len(domains))
 	selected := make([]stagedDomain, 0, len(domains))
 	for _, domain := range domains {
-		item := buildStagedDomain(domain, grouped[domain])
+		item := buildStagedDomain(domain, grouped[domain], opts.StateDir)
 		all = append(all, item)
 		if opts.Scope == "all" || item.report.SafeForUnattendedCutover {
 			selected = append(selected, item)
@@ -192,17 +193,18 @@ func groupSnapshots(snapshots []record.Snapshot, domainFilter string) map[string
 	return out
 }
 
-func buildStagedDomain(domain string, group []record.Snapshot) stagedDomain {
+func buildStagedDomain(domain string, group []record.Snapshot, stateDir string) stagedDomain {
 	sort.SliceStable(group, func(i, j int) bool {
 		return sourceRank(group[i], group) < sourceRank(group[j], group)
 	})
 	source := group[0]
 	authoritySnapshot := firstAuthoritySnapshot(group)
 	classification := classify(group, source, authoritySnapshot)
-	records := cloudflareRecords(domain, source.Records)
+	resource := resourceName("cf", domain)
+	records := managedmarker.Append(cloudflareRecords(domain, source.Records), stateDir, resource)
 	report := CloudflareDomainReport{
 		Domain:                   domain,
-		ResourceName:             resourceName("cf", domain),
+		ResourceName:             resource,
 		SelectedProvider:         strings.ToLower(source.Provider),
 		Classification:           classification,
 		SafeForUnattendedCutover: safeClassification(classification),
