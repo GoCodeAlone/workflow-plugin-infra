@@ -39,6 +39,7 @@ type DomainIntent struct {
 	ForwardTo                  string   `json:"forward_to,omitempty" yaml:"forward_to,omitempty"`
 	WebTarget                  string   `json:"web_target,omitempty" yaml:"web_target,omitempty"`
 	WebHosts                   []string `json:"web_hosts,omitempty" yaml:"web_hosts,omitempty"`
+	ManageUnlisted             *bool    `json:"manage_unlisted,omitempty" yaml:"manage_unlisted,omitempty"`
 }
 
 type Options struct {
@@ -249,6 +250,9 @@ func reconcileDomain(domain string, cfg DomainIntent, snapshots []record.Snapsho
 	plan := recordPlan{}
 	if stageDNS(cfg) {
 		plan = planRecords(domain, cfg, recordsPolicy, group, cfSnapshot)
+		if cfg.ManageUnlisted != nil {
+			plan.manageUnlisted = *cfg.ManageUnlisted
+		}
 		blockers = append(blockers, plan.blockers...)
 	}
 
