@@ -379,6 +379,7 @@ func stringSliceFromAuthority(authority map[string]any, key string) []string {
 func cloudflareRecords(domain string, records []record.Record) []map[string]any {
 	items := make([]map[string]any, 0, len(records))
 	seen := map[string]bool{}
+	dnsOnlyNames := cloudflareDNSOnlyNames(domain, records)
 	for _, rec := range records {
 		recType := strings.ToUpper(rec.Type)
 		if !supportedCloudflareType(recType) {
@@ -407,6 +408,9 @@ func cloudflareRecords(domain string, records []record.Record) []map[string]any 
 			"data": data,
 			"ttl":  ttl,
 		}
+		if shouldProxyCloudflareRecord(recType, name, dnsOnlyNames) {
+			item["proxied"] = true
+		}
 		if recType == "MX" || recType == "SRV" {
 			item["priority"] = priority
 		}
@@ -421,6 +425,58 @@ func cloudflareRecords(domain string, records []record.Record) []map[string]any 
 		return recordKey(items[i]) < recordKey(items[j])
 	})
 	return items
+}
+
+func cloudflareDNSOnlyNames(domain string, records []record.Record) map[string]bool {
+	names := map[string]bool{
+		"autoconfig":   true,
+		"autodiscover": true,
+		"email":        true,
+		"imap":         true,
+		"mail":         true,
+		"pop":          true,
+		"pop3":         true,
+		"smtp":         true,
+		"webmail":      true,
+	}
+	domain = normalizeDomain(domain)
+	for _, rec := range records {
+		if !strings.EqualFold(rec.Type, "MX") {
+			continue
+		}
+		data, _ := recordDataAndPriority(rec)
+		target := normalizeDomain(data)
+		if domain == "" || !strings.HasSuffix(target, "."+domain) {
+			continue
+		}
+		relative := strings.TrimSuffix(target, "."+domain)
+		if relative != "" {
+			names[relative] = true
+		}
+	}
+	return names
+}
+
+func shouldProxyCloudflareRecord(recType, name string, dnsOnlyNames map[string]bool) bool {
+	switch strings.ToUpper(recType) {
+	case "A", "AAAA", "CNAME":
+	default:
+		return false
+	}
+	normalized := normalizeDomain(defaultName(name))
+	if normalized == "" || dnsOnlyNames[normalized] || containsUnderscoreLabel(normalized) {
+		return false
+	}
+	return true
+}
+
+func containsUnderscoreLabel(name string) bool {
+	for _, label := range strings.Split(name, ".") {
+		if strings.HasPrefix(label, "_") {
+			return true
+		}
+	}
+	return false
 }
 
 func recordDataAndPriority(rec record.Record) (string, int) {

@@ -49,6 +49,11 @@ removes existing `A`, `AAAA`, and `CNAME` records for `web_hosts` (default:
 Use this for cutovers such as moving a site to a shared multisite origin without
 discarding mail, verification TXT, or other non-web DNS records.
 
+Generated Cloudflare DNS resources default website-capable `A`, `AAAA`, and
+`CNAME` records to `proxied: true` so moved zones keep Cloudflare edge features.
+Mail/service hostnames such as `mail`, `smtp`, `imap`, `autodiscover`,
+underscore-prefixed service records, and in-zone MX targets are kept DNS-only.
+
 Generated Cloudflare DNS resources include a TXT marker at
 `_workflow-dns-managed.<zone>` with `heritage=wfinfra-v1`, `managed_by=wfctl`,
 the generated state directory, and the resource name. This marker is not the
