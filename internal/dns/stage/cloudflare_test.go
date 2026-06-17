@@ -129,6 +129,96 @@ func TestCompileCloudflareReplacesImportedManagedMarkers(t *testing.T) {
 	}
 }
 
+func TestCompileCloudflareMergesCurrentAuthoritativeRecordsIntoExistingTargetZone(t *testing.T) {
+	dir := t.TempDir()
+	portfolioPath := filepath.Join(dir, "portfolio.json")
+	if err := os.WriteFile(portfolioPath, []byte(`{
+  "schema": "workflow.dns-portfolio.export.v1",
+  "snapshots": [
+    {
+      "id": "cloudflare-gocodealone-tech",
+      "provider": "cloudflare",
+      "domain": "gocodealone.tech",
+      "authority": {
+        "name_servers": ["amos.ns.cloudflare.com", "mckinley.ns.cloudflare.com"],
+        "original_name_servers": ["ns1.digitalocean.com", "ns2.digitalocean.com", "ns3.digitalocean.com"],
+        "role": "target_authoritative_dns"
+      },
+      "records": [
+        {"type": "A", "name": "gocodealone.tech", "value": "162.159.140.98", "ttl": 60},
+        {"type": "CNAME", "name": "admin.gocodealone.tech", "value": "gocodealone-multisite-zeqkn.ondigitalocean.app", "ttl": 1800},
+        {"type": "CNAME", "name": "www.gocodealone.tech", "value": "gocodealone-multisite-zeqkn.ondigitalocean.app", "ttl": 1800}
+      ]
+    },
+    {
+      "id": "digitalocean-gocodealone-tech",
+      "provider": "digitalocean",
+      "domain": "gocodealone.tech",
+      "authority": {
+        "name_servers": ["ns1.digitalocean.com", "ns2.digitalocean.com", "ns3.digitalocean.com"],
+        "role": "authoritative_dns"
+      },
+      "records": [
+        {"type": "A", "name": "@", "value": "162.159.140.98", "ttl": 30},
+        {"type": "CNAME", "name": "*.preview", "value": "gocodealone-multisite-zeqkn.ondigitalocean.app", "ttl": 1800},
+        {"type": "CNAME", "name": "admin", "value": "gocodealone-multisite-zeqkn.ondigitalocean.app", "ttl": 1800},
+        {"type": "CNAME", "name": "www", "value": "gocodealone-multisite-zeqkn.ondigitalocean.app", "ttl": 1800}
+      ]
+    },
+    {
+      "id": "hover-gocodealone-tech",
+      "provider": "hover",
+      "domain": "gocodealone.tech",
+      "authority": {
+        "live_nameservers": ["ns1.digitalocean.com", "ns2.digitalocean.com", "ns3.digitalocean.com"],
+        "registrar_nameservers": ["ns1.digitalocean.com", "ns2.digitalocean.com", "ns3.digitalocean.com"]
+      },
+      "records": []
+    }
+  ]
+}`), 0o644); err != nil {
+		t.Fatalf("write portfolio: %v", err)
+	}
+
+	bundle, err := CompileCloudflare(CloudflareOptions{
+		PortfolioGlobs: []string{portfolioPath},
+		Scope:          "all",
+		StateDir:       ".state/cloudflare-staging-test/",
+	})
+	if err != nil {
+		t.Fatalf("CompileCloudflare: %v", err)
+	}
+	if len(bundle.Config.Modules) < 1 {
+		t.Fatalf("generated no modules")
+	}
+	dns := bundle.Config.Modules[len(bundle.Config.Modules)-1]
+	records, ok := dns.Config["records"].([]map[string]any)
+	if !ok {
+		t.Fatalf("records = %T, want []map[string]any", dns.Config["records"])
+	}
+	counts := map[string]int{}
+	for _, record := range records {
+		name, _ := record["name"].(string)
+		if strings.HasSuffix(name, ".gocodealone.tech") {
+			t.Fatalf("record kept fully-qualified Cloudflare name %q: %#v", name, records)
+		}
+		counts[strings.Join([]string{
+			strings.ToUpper(record["type"].(string)),
+			name,
+			record["data"].(string),
+		}, "\x00")]++
+	}
+	for key, count := range counts {
+		if count != 1 {
+			t.Fatalf("record %q count = %d, want one: %#v", key, count, records)
+		}
+	}
+	wantKey := strings.Join([]string{"CNAME", "*.preview", "gocodealone-multisite-zeqkn.ondigitalocean.app"}, "\x00")
+	if counts[wantKey] != 1 {
+		t.Fatalf("records missing authoritative *.preview CNAME: %#v", records)
+	}
+}
+
 func TestCloudflareRecordsQuotesTXTWithoutTrimmingValue(t *testing.T) {
 	records := cloudflareRecords("example.com", []record.Record{
 		{Type: "TXT", Name: "@", Value: "  token with edge spaces  ", TTL: 300},
