@@ -368,6 +368,86 @@ func TestCompilePreserveAuthoritativeIgnoresStagedCloudflareByDefault(t *testing
 	}
 }
 
+func TestCompileWebTargetReplacesAuthoritativeWebRecords(t *testing.T) {
+	dir := t.TempDir()
+	intentPath := writeTestFile(t, dir, "domains.json", `{
+  "schema": "workflow.domain-intent.v1",
+  "domains": {
+    "example.com": {
+      "registrar": "hover",
+      "dns_host": "cloudflare",
+      "stage_dns": true,
+      "web_target": "gocodealone-multisite-zeqkn.ondigitalocean.app.",
+      "web_hosts": ["@", "www", "*"]
+    }
+  }
+}`)
+	portfolioPath := writeTestFile(t, dir, "portfolio.json", `{
+  "schema": "workflow.dns-portfolio.export.v1",
+  "snapshots": [
+    {
+      "id": "cf",
+      "provider": "cloudflare",
+      "domain": "example.com",
+      "authority": {"name_servers": ["a.ns.cloudflare.com", "b.ns.cloudflare.com"]},
+      "records": []
+    },
+    {
+      "id": "hover",
+      "provider": "hover",
+      "domain": "example.com",
+      "authority": {"registrar_nameservers": ["ns12.wixdns.net", "ns13.wixdns.net"]},
+      "records": [
+        {"type": "A", "name": "@", "value": "216.40.34.41", "ttl": 900},
+        {"type": "A", "name": "*", "value": "216.40.34.41", "ttl": 900},
+        {"type": "CNAME", "name": "www", "value": "example.wixdns.net.", "ttl": 900},
+        {"type": "MX", "name": "@", "value": "10 mx.hover.com.cust.hostedemail.com.", "ttl": 900},
+        {"type": "CNAME", "name": "mail", "value": "mail.hover.com.cust.hostedemail.com.", "ttl": 900},
+        {"type": "TXT", "name": "@", "value": "google-site-verification=abc123", "ttl": 900}
+      ]
+    }
+  ]
+}`)
+
+	bundle, err := Compile(Options{IntentPath: intentPath, PortfolioGlobs: []string{portfolioPath}})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	if bundle.Report.BlockedDomains != 0 {
+		t.Fatalf("blocked domains = %d; report=%+v", bundle.Report.BlockedDomains, bundle.Report)
+	}
+	got := moduleByName(bundle.Config.Modules, "cf-example-com")
+	if got == nil {
+		t.Fatalf("missing generated Cloudflare module: %+v", bundle.Config.Modules)
+	}
+	records, ok := got.Config["records"].([]map[string]any)
+	if !ok {
+		t.Fatalf("records = %T, want []map[string]any", got.Config["records"])
+	}
+	target := "gocodealone-multisite-zeqkn.ondigitalocean.app"
+	for _, host := range []string{"@", "www", "*"} {
+		rec := recordByTypeName(records, "CNAME", host)
+		if rec == nil {
+			t.Fatalf("missing web target record %s in %#v", host, records)
+		}
+		if rec["data"] != target || rec["ttl"] != 1 || rec["proxied"] != true {
+			t.Fatalf("web target record %s = %#v", host, rec)
+		}
+	}
+	if stale := recordByTypeName(records, "A", "@"); stale != nil {
+		t.Fatalf("stale apex A record retained: %#v", stale)
+	}
+	if mx := recordByTypeName(records, "MX", "@"); mx == nil || mx["data"] != "mx.hover.com.cust.hostedemail.com" {
+		t.Fatalf("MX record = %#v, want preserved mail routing", mx)
+	}
+	if mail := recordByTypeName(records, "CNAME", "mail"); mail == nil || mail["data"] != "mail.hover.com.cust.hostedemail.com" {
+		t.Fatalf("mail CNAME = %#v, want preserved mail alias", mail)
+	}
+	if txt := recordByTypeName(records, "TXT", "@"); txt == nil || txt["data"] != `"google-site-verification=abc123"` {
+		t.Fatalf("TXT record = %#v, want preserved quoted TXT", txt)
+	}
+}
+
 func TestCompilePreserveAuthoritativeNormalizesCloudflareRecords(t *testing.T) {
 	dir := t.TempDir()
 	intentPath := writeTestFile(t, dir, "domains.json", `{
@@ -476,6 +556,15 @@ func moduleByName(modules []config.ModuleConfig, name string) *config.ModuleConf
 func managedMarkerRecord(records []map[string]any) map[string]any {
 	for _, record := range records {
 		if record["type"] == "TXT" && record["name"] == "_workflow-dns-managed" {
+			return record
+		}
+	}
+	return nil
+}
+
+func recordByTypeName(records []map[string]any, recType, name string) map[string]any {
+	for _, record := range records {
+		if record["type"] == recType && record["name"] == name {
 			return record
 		}
 	}
