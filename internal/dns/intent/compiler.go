@@ -834,6 +834,10 @@ func cloudflareDNSOnlyNames(domain string, records []record.Record) map[string]b
 		}
 		data, _ := recordDataAndPriority(rec)
 		target := normalizeDomain(data)
+		if domain != "" && target == domain {
+			names["@"] = true
+			continue
+		}
 		if domain == "" || !strings.HasSuffix(target, "."+domain) {
 			continue
 		}

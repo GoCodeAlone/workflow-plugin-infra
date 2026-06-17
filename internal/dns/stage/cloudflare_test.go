@@ -267,6 +267,21 @@ func TestCloudflareRecordsDefaultsProxiableRecordsToProxied(t *testing.T) {
 	}
 }
 
+func TestCloudflareRecordsKeepApexMXTargetDNSOnly(t *testing.T) {
+	records := cloudflareRecords("example.com", []record.Record{
+		{Type: "A", Name: "@", Value: "192.0.2.10", TTL: 300},
+		{Type: "MX", Name: "@", Value: "10 example.com.", TTL: 300},
+	})
+
+	apex := stageRecordByTypeName(records, "A", "@")
+	if apex == nil {
+		t.Fatalf("missing apex A in records: %#v", records)
+	}
+	if proxied, ok := apex["proxied"]; ok {
+		t.Fatalf("apex A proxied = %#v, want omitted because apex is an MX target; record=%#v", proxied, apex)
+	}
+}
+
 func stageRecordByTypeName(records []map[string]any, recordType, name string) map[string]any {
 	for _, rec := range records {
 		if rec["type"] == recordType && rec["name"] == name {

@@ -759,6 +759,59 @@ func TestCompilePreserveAuthoritativeDefaultsProxiableRecordsToProxied(t *testin
 	}
 }
 
+func TestCompilePreserveAuthoritativeKeepsApexMXTargetDNSOnly(t *testing.T) {
+	dir := t.TempDir()
+	intentPath := writeTestFile(t, dir, "domains.json", `{
+  "schema": "workflow.domain-intent.v1",
+  "domains": {
+    "example.com": {
+      "registrar": "hover",
+      "dns_host": "cloudflare",
+      "stage_dns": true
+    }
+  }
+}`)
+	portfolioPath := writeTestFile(t, dir, "portfolio.json", `{
+  "schema": "workflow.dns-portfolio.export.v1",
+  "snapshots": [
+    {
+      "id": "cf",
+      "provider": "cloudflare",
+      "domain": "example.com",
+      "authority": {"name_servers": ["a.ns.cloudflare.com", "b.ns.cloudflare.com"]},
+      "records": []
+    },
+    {
+      "id": "hover",
+      "provider": "hover",
+      "domain": "example.com",
+      "authority": {"registrar_nameservers": ["ns1.hover.com", "ns2.hover.com"]},
+      "records": [
+        {"type": "A", "name": "@", "value": "192.0.2.10", "ttl": 900},
+        {"type": "MX", "name": "@", "value": "10 example.com.", "ttl": 900}
+      ]
+    }
+  ]
+}`)
+
+	bundle, err := Compile(Options{IntentPath: intentPath, PortfolioGlobs: []string{portfolioPath}})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	got := moduleByName(bundle.Config.Modules, "cf-example-com")
+	if got == nil {
+		t.Fatalf("missing generated Cloudflare module: %+v", bundle.Config.Modules)
+	}
+	records := got.Config["records"].([]map[string]any)
+	apex := recordByTypeName(records, "A", "@")
+	if apex == nil {
+		t.Fatalf("missing apex A in records: %#v", records)
+	}
+	if proxied, ok := apex["proxied"]; ok {
+		t.Fatalf("apex A proxied = %#v, want omitted because apex is an MX target; record=%#v", proxied, apex)
+	}
+}
+
 func TestCurrentAuthorityProviderIsOrderIndependent(t *testing.T) {
 	group := []record.Snapshot{
 		{
