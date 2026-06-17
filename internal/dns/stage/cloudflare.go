@@ -200,9 +200,14 @@ func buildStagedDomain(domain string, group []record.Snapshot, stateDir string) 
 	})
 	source := group[0]
 	authoritySnapshot := firstAuthoritySnapshot(group)
+	currentAuthoritySource := currentAuthoritativeSource(group)
 	classification := classify(group, source, authoritySnapshot)
 	resource := resourceName("cf", domain)
-	records := managedmarker.Append(cloudflareRecords(domain, source.Records), stateDir, resource)
+	recordSource := source.Records
+	if strings.EqualFold(source.Provider, "cloudflare") && currentAuthoritySource.Provider != "" && !strings.EqualFold(currentAuthoritySource.Provider, "cloudflare") {
+		recordSource = append(append([]record.Record(nil), source.Records...), currentAuthoritySource.Records...)
+	}
+	records := managedmarker.Append(cloudflareRecords(domain, recordSource), stateDir, resource)
 	report := CloudflareDomainReport{
 		Domain:                   domain,
 		ResourceName:             resource,
@@ -222,6 +227,39 @@ func firstAuthoritySnapshot(group []record.Snapshot) record.Snapshot {
 		}
 	}
 	return record.Snapshot{}
+}
+
+func currentAuthoritativeSource(group []record.Snapshot) record.Snapshot {
+	currentProvider := currentDelegationProvider(group)
+	if currentProvider != "" {
+		for _, snapshot := range group {
+			if strings.EqualFold(snapshot.Provider, currentProvider) {
+				return snapshot
+			}
+		}
+	}
+	for _, snapshot := range group {
+		if nameserverProvider(snapshot) == strings.ToLower(snapshot.Provider) {
+			return snapshot
+		}
+	}
+	return record.Snapshot{}
+}
+
+func currentDelegationProvider(group []record.Snapshot) string {
+	providers := map[string]bool{}
+	for _, snapshot := range group {
+		if provider := nameserverProvider(snapshot); provider != "" {
+			providers[provider] = true
+		}
+	}
+	if len(providers) != 1 {
+		return ""
+	}
+	for provider := range providers {
+		return provider
+	}
+	return ""
 }
 
 func classify(group []record.Snapshot, source, authoritySnapshot record.Snapshot) string {
@@ -346,7 +384,7 @@ func cloudflareRecords(domain string, records []record.Record) []map[string]any 
 		if !supportedCloudflareType(recType) {
 			continue
 		}
-		name := defaultName(rec.Name)
+		name := cloudflareRecordName(domain, rec.Name)
 		if recType == "NS" && (name == "@" || normalizeDomain(name) == domain) {
 			continue
 		}
@@ -432,6 +470,22 @@ func supportedCloudflareType(recType string) bool {
 func defaultName(name string) string {
 	if strings.TrimSpace(name) == "" {
 		return "@"
+	}
+	return name
+}
+
+func cloudflareRecordName(domain, name string) string {
+	name = strings.TrimSuffix(strings.TrimSpace(defaultName(name)), ".")
+	if name == "@" {
+		return "@"
+	}
+	normalizedName := normalizeDomain(name)
+	if normalizedName == domain {
+		return "@"
+	}
+	suffix := "." + domain
+	if strings.HasSuffix(normalizedName, suffix) {
+		return strings.TrimSuffix(normalizedName, suffix)
 	}
 	return name
 }
