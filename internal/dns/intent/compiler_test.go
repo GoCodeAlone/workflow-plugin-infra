@@ -685,6 +685,133 @@ func TestCompilePreserveAuthoritativeNormalizesCloudflareRecords(t *testing.T) {
 	}
 }
 
+func TestCompilePreserveAuthoritativeDefaultsProxiableRecordsToProxied(t *testing.T) {
+	dir := t.TempDir()
+	intentPath := writeTestFile(t, dir, "domains.json", `{
+  "schema": "workflow.domain-intent.v1",
+  "domains": {
+    "example.com": {
+      "registrar": "hover",
+      "dns_host": "cloudflare",
+      "stage_dns": true
+    }
+  }
+}`)
+	portfolioPath := writeTestFile(t, dir, "portfolio.json", `{
+  "schema": "workflow.dns-portfolio.export.v1",
+  "snapshots": [
+    {
+      "id": "cf",
+      "provider": "cloudflare",
+      "domain": "example.com",
+      "authority": {"name_servers": ["a.ns.cloudflare.com", "b.ns.cloudflare.com"]},
+      "records": []
+    },
+    {
+      "id": "hover",
+      "provider": "hover",
+      "domain": "example.com",
+      "authority": {"registrar_nameservers": ["ns1.hover.com", "ns2.hover.com"]},
+      "records": [
+        {"type": "A", "name": "@", "value": "192.0.2.10", "ttl": 900},
+        {"type": "AAAA", "name": "ipv6", "value": "2001:db8::10", "ttl": 900},
+        {"type": "CNAME", "name": "www", "value": "example.com.", "ttl": 900},
+        {"type": "CNAME", "name": "mail", "value": "mail.example.net.", "ttl": 900},
+        {"type": "A", "name": "mx", "value": "192.0.2.20", "ttl": 900},
+        {"type": "MX", "name": "@", "value": "10 mx.example.com.", "ttl": 900},
+        {"type": "TXT", "name": "@", "value": "v=spf1 -all", "ttl": 900}
+      ]
+    }
+  ]
+}`)
+
+	bundle, err := Compile(Options{IntentPath: intentPath, PortfolioGlobs: []string{portfolioPath}})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	got := moduleByName(bundle.Config.Modules, "cf-example-com")
+	if got == nil {
+		t.Fatalf("missing generated Cloudflare module: %+v", bundle.Config.Modules)
+	}
+	records := got.Config["records"].([]map[string]any)
+	for _, tc := range []struct {
+		recordType string
+		name       string
+		wantSet    bool
+		wantValue  bool
+	}{
+		{"A", "@", true, true},
+		{"AAAA", "ipv6", true, true},
+		{"CNAME", "www", true, true},
+		{"CNAME", "mail", false, false},
+		{"A", "mx", false, false},
+		{"MX", "@", false, false},
+		{"TXT", "@", false, false},
+	} {
+		rec := recordByTypeName(records, tc.recordType, tc.name)
+		if rec == nil {
+			t.Fatalf("missing %s %s in records: %#v", tc.recordType, tc.name, records)
+		}
+		gotValue, gotSet := rec["proxied"]
+		if gotSet != tc.wantSet || (gotSet && gotValue != tc.wantValue) {
+			t.Fatalf("%s %s proxied = (%#v, %v), want (%#v, %v); record=%#v", tc.recordType, tc.name, gotValue, gotSet, tc.wantValue, tc.wantSet, rec)
+		}
+	}
+}
+
+func TestCompilePreserveAuthoritativeKeepsApexMXTargetDNSOnly(t *testing.T) {
+	dir := t.TempDir()
+	intentPath := writeTestFile(t, dir, "domains.json", `{
+  "schema": "workflow.domain-intent.v1",
+  "domains": {
+    "example.com": {
+      "registrar": "hover",
+      "dns_host": "cloudflare",
+      "stage_dns": true
+    }
+  }
+}`)
+	portfolioPath := writeTestFile(t, dir, "portfolio.json", `{
+  "schema": "workflow.dns-portfolio.export.v1",
+  "snapshots": [
+    {
+      "id": "cf",
+      "provider": "cloudflare",
+      "domain": "example.com",
+      "authority": {"name_servers": ["a.ns.cloudflare.com", "b.ns.cloudflare.com"]},
+      "records": []
+    },
+    {
+      "id": "hover",
+      "provider": "hover",
+      "domain": "example.com",
+      "authority": {"registrar_nameservers": ["ns1.hover.com", "ns2.hover.com"]},
+      "records": [
+        {"type": "A", "name": "@", "value": "192.0.2.10", "ttl": 900},
+        {"type": "MX", "name": "@", "value": "10 example.com.", "ttl": 900}
+      ]
+    }
+  ]
+}`)
+
+	bundle, err := Compile(Options{IntentPath: intentPath, PortfolioGlobs: []string{portfolioPath}})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	got := moduleByName(bundle.Config.Modules, "cf-example-com")
+	if got == nil {
+		t.Fatalf("missing generated Cloudflare module: %+v", bundle.Config.Modules)
+	}
+	records := got.Config["records"].([]map[string]any)
+	apex := recordByTypeName(records, "A", "@")
+	if apex == nil {
+		t.Fatalf("missing apex A in records: %#v", records)
+	}
+	if proxied, ok := apex["proxied"]; ok {
+		t.Fatalf("apex A proxied = %#v, want omitted because apex is an MX target; record=%#v", proxied, apex)
+	}
+}
+
 func TestCurrentAuthorityProviderIsOrderIndependent(t *testing.T) {
 	group := []record.Snapshot{
 		{

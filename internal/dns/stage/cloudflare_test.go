@@ -230,3 +230,63 @@ func TestCloudflareRecordsQuotesTXTWithoutTrimmingValue(t *testing.T) {
 		t.Fatalf("TXT data = %#v, want %#v", got, want)
 	}
 }
+
+func TestCloudflareRecordsDefaultsProxiableRecordsToProxied(t *testing.T) {
+	records := cloudflareRecords("example.com", []record.Record{
+		{Type: "A", Name: "@", Value: "192.0.2.10", TTL: 300},
+		{Type: "AAAA", Name: "ipv6", Value: "2001:db8::10", TTL: 300},
+		{Type: "CNAME", Name: "www", Value: "example.com.", TTL: 300},
+		{Type: "CNAME", Name: "mail", Value: "mail.example.net.", TTL: 300},
+		{Type: "A", Name: "mx", Value: "192.0.2.20", TTL: 300},
+		{Type: "MX", Name: "@", Value: "10 mx.example.com.", TTL: 300},
+		{Type: "TXT", Name: "@", Value: "v=spf1 -all", TTL: 300},
+	})
+
+	for _, tc := range []struct {
+		recordType string
+		name       string
+		wantSet    bool
+		wantValue  bool
+	}{
+		{"A", "@", true, true},
+		{"AAAA", "ipv6", true, true},
+		{"CNAME", "www", true, true},
+		{"CNAME", "mail", false, false},
+		{"A", "mx", false, false},
+		{"MX", "@", false, false},
+		{"TXT", "@", false, false},
+	} {
+		rec := stageRecordByTypeName(records, tc.recordType, tc.name)
+		if rec == nil {
+			t.Fatalf("missing %s %s in records: %#v", tc.recordType, tc.name, records)
+		}
+		gotValue, gotSet := rec["proxied"]
+		if gotSet != tc.wantSet || (gotSet && gotValue != tc.wantValue) {
+			t.Fatalf("%s %s proxied = (%#v, %v), want (%#v, %v); record=%#v", tc.recordType, tc.name, gotValue, gotSet, tc.wantValue, tc.wantSet, rec)
+		}
+	}
+}
+
+func TestCloudflareRecordsKeepApexMXTargetDNSOnly(t *testing.T) {
+	records := cloudflareRecords("example.com", []record.Record{
+		{Type: "A", Name: "@", Value: "192.0.2.10", TTL: 300},
+		{Type: "MX", Name: "@", Value: "10 example.com.", TTL: 300},
+	})
+
+	apex := stageRecordByTypeName(records, "A", "@")
+	if apex == nil {
+		t.Fatalf("missing apex A in records: %#v", records)
+	}
+	if proxied, ok := apex["proxied"]; ok {
+		t.Fatalf("apex A proxied = %#v, want omitted because apex is an MX target; record=%#v", proxied, apex)
+	}
+}
+
+func stageRecordByTypeName(records []map[string]any, recordType, name string) map[string]any {
+	for _, rec := range records {
+		if rec["type"] == recordType && rec["name"] == name {
+			return rec
+		}
+	}
+	return nil
+}
