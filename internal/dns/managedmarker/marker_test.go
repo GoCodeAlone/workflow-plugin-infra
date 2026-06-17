@@ -7,6 +7,7 @@ func TestAppendReplacesExistingManagedMarkers(t *testing.T) {
 		{"type": "A", "name": "@", "data": "192.0.2.10", "ttl": 300},
 		{"type": "TXT", "name": Name, "data": `"heritage=wfinfra-v1 managed_by=wfctl state_dir=.state/old/ resource=cf-old"`, "ttl": 300},
 		{"type": "txt", "name": Name + ".", "data": `"heritage=wfinfra-v1 managed_by=wfctl state_dir=.state/other/ resource=cf-other"`, "ttl": 300},
+		{"type": "TXT", "name": Name + ".example.com", "data": `"heritage=wfinfra-v1 managed_by=wfctl state_dir=.state/provider/ resource=cf-example-com"`, "ttl": 300},
 	}
 
 	out := Append(records, ".state/new/", "cf-example-com")
