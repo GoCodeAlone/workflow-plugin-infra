@@ -87,6 +87,70 @@ func TestCompileDiscardParkedProducesCloudflareAndHoverResources(t *testing.T) {
 	}
 }
 
+func TestCompileNamecheapCutoverProducesDelegationResource(t *testing.T) {
+	dir := t.TempDir()
+	intentPath := writeTestFile(t, dir, "domains.json", `{
+  "schema": "workflow.domain-intent.v1",
+  "domains": {
+    "example.com": {
+      "registrar": "namecheap",
+      "dns_host": "cloudflare",
+      "stage_dns": false,
+      "nameserver_cutover": true,
+      "expected_current_nameservers": ["dns2.registrar-servers.com", "dns1.registrar-servers.com"]
+    }
+  }
+}`)
+	portfolioPath := writeTestFile(t, dir, "portfolio.json", `{
+  "schema": "workflow.dns-portfolio.export.v1",
+  "snapshots": [
+    {
+      "id": "cf-example-com",
+      "provider": "cloudflare",
+      "domain": "example.com",
+      "authority": {"name_servers": ["amos.ns.cloudflare.com", "mckinley.ns.cloudflare.com"]}
+    },
+    {
+      "id": "namecheap-example-com",
+      "provider": "namecheap",
+      "domain": "example.com",
+      "authority": {"registrar_nameservers": ["dns1.registrar-servers.com", "dns2.registrar-servers.com"]}
+    }
+  ]
+}`)
+
+	bundle, err := Compile(Options{IntentPath: intentPath, PortfolioGlobs: []string{portfolioPath}})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	if bundle.Report.BlockedDomains != 0 {
+		t.Fatalf("blocked domains = %d; report=%+v", bundle.Report.BlockedDomains, bundle.Report)
+	}
+	provider := moduleByName(bundle.Config.Modules, "namecheap")
+	if provider == nil || provider.Type != "iac.provider" {
+		t.Fatalf("missing Namecheap provider module: %+v", bundle.Config.Modules)
+	}
+	if provider.Config["api_user"] != "${NAMECHEAP_API_USER}" || provider.Config["client_ip"] != "${NAMECHEAP_CLIENT_IP}" {
+		t.Fatalf("Namecheap provider config = %#v", provider.Config)
+	}
+	delegation := moduleByName(bundle.Config.Modules, "namecheap-delegation-example-com")
+	if delegation == nil || delegation.Type != "infra.dns_delegation" {
+		t.Fatalf("missing Namecheap delegation module: %+v", bundle.Config.Modules)
+	}
+	if delegation.Config["provider"] != "namecheap" || delegation.Config["domain"] != "example.com" {
+		t.Fatalf("delegation config = %#v", delegation.Config)
+	}
+	wantNS := []string{"amos.ns.cloudflare.com", "mckinley.ns.cloudflare.com"}
+	gotNS, ok := delegation.Config["nameservers"].([]string)
+	if !ok || !equalStrings(gotNS, wantNS) {
+		t.Fatalf("delegation nameservers = %#v, want %#v", delegation.Config["nameservers"], wantNS)
+	}
+	action := bundle.Report.Domains[0].Actions[0]
+	if action.Provider != "namecheap" || action.Resource != "namecheap-delegation-example-com" {
+		t.Fatalf("action = %#v", action)
+	}
+}
+
 func TestCompileForwardToProducesCloudflareRedirectResource(t *testing.T) {
 	dir := t.TempDir()
 	intentPath := writeTestFile(t, dir, "domains.json", `{

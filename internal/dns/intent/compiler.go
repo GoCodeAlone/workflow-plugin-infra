@@ -214,7 +214,7 @@ func reconcileDomain(domain string, cfg DomainIntent, snapshots []record.Snapsho
 	if desiredDNSHost != "cloudflare" {
 		blockers = append(blockers, fmt.Sprintf("dns_host %q is not supported yet", desiredDNSHost))
 	}
-	if cfg.NameserverCutover && registrar != "hover" {
+	if cfg.NameserverCutover && !supportsNameserverCutover(registrar) {
 		blockers = append(blockers, fmt.Sprintf("registrar %q nameserver cutover is not supported yet", registrar))
 	}
 	if cfg.NameserverCutover && len(cfg.ExpectedCurrentNameservers) > 0 {
@@ -312,11 +312,11 @@ func reconcileDomain(domain string, cfg DomainIntent, snapshots []record.Snapsho
 		})
 	}
 	if cfg.NameserverCutover {
-		resource := resourceName("hover-delegation", domain)
+		resource := resourceName(registrar+"-delegation", domain)
 		expected := normalizeNameservers(cfg.ExpectedCurrentNameservers)
 		report.Actions = append(report.Actions, Action{
 			Type:                       "set_nameservers",
-			Provider:                   "hover",
+			Provider:                   registrar,
 			Resource:                   resource,
 			DesiredNameservers:         cfNameservers,
 			ExpectedCurrentNameservers: expected,
@@ -325,7 +325,7 @@ func reconcileDomain(domain string, cfg DomainIntent, snapshots []record.Snapsho
 			Name: resource,
 			Type: "infra.dns_delegation",
 			Config: map[string]any{
-				"provider":    "hover",
+				"provider":    registrar,
 				"domain":      domain,
 				"nameservers": cfNameservers,
 			},
@@ -338,6 +338,7 @@ func buildBundle(results []compileResult, stateDir string) *Bundle {
 	var modules []config.ModuleConfig
 	needCloudflare := false
 	needHover := false
+	needNamecheap := false
 	report := Report{Schema: ReportSchemaV1}
 	for i := range results {
 		result := &results[i]
@@ -353,6 +354,8 @@ func buildBundle(results []compileResult, stateDir string) *Bundle {
 				needCloudflare = true
 			case "hover":
 				needHover = true
+			case "namecheap":
+				needNamecheap = true
 			}
 		}
 	}
@@ -379,6 +382,18 @@ func buildBundle(results []compileResult, stateDir string) *Bundle {
 				"browser_profile_dir": "${HOVER_BROWSER_PROFILE_DIR}",
 				"browser_headless":    true,
 				"browser_download":    true,
+			},
+		})
+	}
+	if needNamecheap {
+		modules = append(modules, config.ModuleConfig{
+			Name: "namecheap",
+			Type: "iac.provider",
+			Config: map[string]any{ //nolint:gosec // Values are env placeholders, not literal credentials.
+				"provider":  "namecheap",
+				"api_user":  "${NAMECHEAP_API_USER}",
+				"api_key":   "${NAMECHEAP_API_KEY}",
+				"client_ip": "${NAMECHEAP_CLIENT_IP}",
 			},
 		})
 	}
@@ -554,6 +569,15 @@ func stageDNS(cfg DomainIntent) bool {
 		return true
 	}
 	return *cfg.StageDNS
+}
+
+func supportsNameserverCutover(registrar string) bool {
+	switch strings.ToLower(strings.TrimSpace(registrar)) {
+	case "hover", "namecheap":
+		return true
+	default:
+		return false
+	}
 }
 
 func snapshotsForDomain(snapshots []record.Snapshot, domain string) []record.Snapshot {
