@@ -91,6 +91,9 @@ func TestCompileCloudflareReplacesImportedManagedMarkers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CompileCloudflare: %v", err)
 	}
+	if len(bundle.Config.Modules) < 1 {
+		t.Fatalf("generated no modules")
+	}
 	dns := bundle.Config.Modules[len(bundle.Config.Modules)-1]
 	records, ok := dns.Config["records"].([]map[string]any)
 	if !ok {
@@ -100,7 +103,9 @@ func TestCompileCloudflareReplacesImportedManagedMarkers(t *testing.T) {
 	var markers []map[string]any
 	var googleTXT bool
 	for _, record := range records {
-		if record["type"] == "TXT" && strings.HasPrefix(record["name"].(string), "_workflow-dns-managed") {
+		name, _ := record["name"].(string)
+		normalizedName := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(name), "."))
+		if record["type"] == "TXT" && (normalizedName == "_workflow-dns-managed" || strings.HasPrefix(normalizedName, "_workflow-dns-managed.")) {
 			markers = append(markers, record)
 		}
 		if record["type"] == "TXT" && record["name"] == "@" && record["data"] == `"google-site-verification=abc123"` {
