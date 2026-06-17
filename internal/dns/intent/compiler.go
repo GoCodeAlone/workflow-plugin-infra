@@ -37,6 +37,8 @@ type DomainIntent struct {
 	ExpectedCurrentNameservers []string `json:"expected_current_nameservers,omitempty" yaml:"expected_current_nameservers,omitempty"`
 	AllowDiscardNonparked      bool     `json:"allow_discard_nonparked,omitempty" yaml:"allow_discard_nonparked,omitempty"`
 	ForwardTo                  string   `json:"forward_to,omitempty" yaml:"forward_to,omitempty"`
+	WebTarget                  string   `json:"web_target,omitempty" yaml:"web_target,omitempty"`
+	WebHosts                   []string `json:"web_hosts,omitempty" yaml:"web_hosts,omitempty"`
 }
 
 type Options struct {
@@ -232,6 +234,17 @@ func reconcileDomain(domain string, cfg DomainIntent, snapshots []record.Snapsho
 			blockers = append(blockers, err.Error())
 		}
 	}
+	if strings.TrimSpace(cfg.WebTarget) != "" {
+		if desiredDNSHost != "cloudflare" {
+			blockers = append(blockers, "web_target is only supported for dns_host cloudflare")
+		}
+		if normalized := normalizeWebTarget(cfg.WebTarget); normalized == "" {
+			blockers = append(blockers, "web_target must be a non-empty DNS name")
+		}
+		if len(webHostSet(domain, cfg)) == 0 {
+			blockers = append(blockers, "web_hosts must contain at least one valid host when web_target is set")
+		}
+	}
 
 	plan := recordPlan{}
 	if stageDNS(cfg) {
@@ -388,28 +401,46 @@ func buildBundle(results []compileResult, stateDir string) *Bundle {
 
 func planRecords(domain string, cfg DomainIntent, policy string, group []record.Snapshot, cfSnapshot record.Snapshot) recordPlan {
 	hoverSnapshot, hasHover := firstSnapshotByProvider(group, "hover")
+	withWebTarget := func(plan recordPlan) recordPlan {
+		if len(plan.blockers) > 0 || strings.TrimSpace(cfg.WebTarget) == "" {
+			return plan
+		}
+		plan.records = applyWebTarget(domain, plan.records, cfg)
+		plan.manageUnlisted = true
+		return plan
+	}
 	switch policy {
 	case "discard_parked":
 		if hasHover && parkedHoverRecords(hoverSnapshot.Records) {
-			return recordPlan{records: redirectProxyRecordsIfNeeded(domain, cfg), manageUnlisted: true}
+			return withWebTarget(discardParkedPlan(domain, cfg, hoverSnapshot.Records))
 		}
 		if cfg.AllowDiscardNonparked {
-			return recordPlan{records: redirectProxyRecordsIfNeeded(domain, cfg), manageUnlisted: true}
+			if selected, ok := selectSource(group); ok {
+				return withWebTarget(discardParkedPlan(domain, cfg, selected.Records))
+			}
+			return recordPlan{blockers: []string{"no portfolio snapshot available for records"}}
 		}
 		return recordPlan{blockers: []string{"records_policy discard_parked requested but Hover records do not match parked-record pattern"}}
 	case "preserve_authoritative":
 		if selected, ok := selectSource(group); ok {
-			return recordPlan{records: cloudflareRecords(domain, selected.Records)}
+			return withWebTarget(recordPlan{records: cloudflareRecords(domain, selected.Records)})
 		}
 		return recordPlan{blockers: []string{"no portfolio snapshot available for records"}}
 	case "preserve_cloudflare":
 		if cfSnapshot.Provider != "" {
-			return recordPlan{records: cloudflareRecords(domain, cfSnapshot.Records)}
+			return withWebTarget(recordPlan{records: cloudflareRecords(domain, cfSnapshot.Records)})
 		}
 		return recordPlan{blockers: []string{"records_policy preserve_cloudflare requested but no Cloudflare snapshot exists"}}
 	default:
 		return recordPlan{blockers: []string{fmt.Sprintf("unsupported records_policy %q", policy)}}
 	}
+}
+
+func discardParkedPlan(domain string, cfg DomainIntent, records []record.Record) recordPlan {
+	if strings.TrimSpace(cfg.WebTarget) != "" {
+		return recordPlan{records: cloudflareRecords(domain, records), manageUnlisted: true}
+	}
+	return recordPlan{records: redirectProxyRecordsIfNeeded(domain, cfg), manageUnlisted: true}
 }
 
 func validateForwardTarget(raw string) error {
@@ -435,6 +466,87 @@ func redirectProxyRecordsIfNeeded(domain string, cfg DomainIntent) []map[string]
 		"proxied": true,
 		"comment": "Originless placeholder for Cloudflare redirect rules",
 	}}
+}
+
+func applyWebTarget(domain string, records []map[string]any, cfg DomainIntent) []map[string]any {
+	target := normalizeWebTarget(cfg.WebTarget)
+	if target == "" {
+		return records
+	}
+	hosts := webHostSet(domain, cfg)
+	out := make([]map[string]any, 0, len(records)+len(hosts))
+	for _, item := range records {
+		if isWebRecordForHost(domain, item, hosts) {
+			continue
+		}
+		out = append(out, item)
+	}
+	for _, host := range sortedWebHosts(hosts) {
+		out = append(out, map[string]any{
+			"type":    "CNAME",
+			"name":    host,
+			"data":    target,
+			"ttl":     1,
+			"proxied": true,
+		})
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		return recordKey(out[i]) < recordKey(out[j])
+	})
+	return out
+}
+
+func webHostSet(domain string, cfg DomainIntent) map[string]bool {
+	values := cfg.WebHosts
+	if len(values) == 0 {
+		values = []string{"@", "www"}
+	}
+	hosts := map[string]bool{}
+	for _, value := range values {
+		if host := normalizeWebHost(domain, value); host != "" {
+			hosts[host] = true
+		}
+	}
+	return hosts
+}
+
+func sortedWebHosts(hosts map[string]bool) []string {
+	out := make([]string, 0, len(hosts))
+	for host := range hosts {
+		out = append(out, host)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func isWebRecordForHost(domain string, item map[string]any, hosts map[string]bool) bool {
+	recType := strings.ToUpper(fmt.Sprint(item["type"]))
+	switch recType {
+	case "A", "AAAA", "CNAME":
+	default:
+		return false
+	}
+	name := normalizeWebHost(domain, defaultName(fmt.Sprint(item["name"])))
+	return hosts[name]
+}
+
+func normalizeWebHost(domain, raw string) string {
+	host := normalizeDomain(raw)
+	if host == "" || host == "." {
+		return ""
+	}
+	domain = normalizeDomain(domain)
+	if host == domain {
+		return "@"
+	}
+	if strings.HasSuffix(host, "."+domain) {
+		return strings.TrimSuffix(host, "."+domain)
+	}
+	return host
+}
+
+func normalizeWebTarget(raw string) string {
+	return normalizeDomain(raw)
 }
 
 func stageDNS(cfg DomainIntent) bool {

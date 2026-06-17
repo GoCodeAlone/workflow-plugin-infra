@@ -41,6 +41,14 @@ Cloudflare DNS. The compiler emits:
 - a Cloudflare `infra.http_redirect` resource targeting `forward_to`, preserving
   path and query string by default.
 
+Domain intent may include `web_target` for domains whose authoritative zone is
+being moved to Cloudflare while web hosting is moving to another platform. When
+set, the compiler preserves non-web records from the selected source snapshot,
+removes existing `A`, `AAAA`, and `CNAME` records for `web_hosts` (default:
+`@`, `www`), and emits proxied Cloudflare `CNAME` records to `web_target`.
+Use this for cutovers such as moving a site to a shared multisite origin without
+discarding mail, verification TXT, or other non-web DNS records.
+
 Generated Cloudflare DNS resources include a TXT marker at
 `_workflow-dns-managed.<zone>` with `heritage=wfinfra-v1`, `managed_by=wfctl`,
 the generated state directory, and the resource name. This marker is not the
