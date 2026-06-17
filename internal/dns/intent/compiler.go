@@ -17,9 +17,10 @@ import (
 )
 
 const (
-	SchemaV1       = "workflow.domain-intent.v1"
-	LegacySchemaV1 = "gocodealone.domain-intent.v1"
-	ReportSchemaV1 = "workflow.domain-intent.report.v1"
+	SchemaV1                     = "workflow.domain-intent.v1"
+	LegacySchemaV1               = "gocodealone.domain-intent.v1"
+	ReportSchemaV1               = "workflow.domain-intent.report.v1"
+	cloudflareDNSManagedStateDir = ".state/cloudflare-staging/"
 )
 
 type Document struct {
@@ -253,7 +254,7 @@ func reconcileDomain(domain string, cfg DomainIntent, snapshots []record.Snapsho
 	var modules []config.ModuleConfig
 	if stageDNS(cfg) {
 		resource := resourceName("cf", domain)
-		records := managedmarker.Append(plan.records, stateDir, resource)
+		records := managedmarker.Append(plan.records, cloudflareDNSManagedStateDir, resource)
 		report.Actions = append(report.Actions, Action{
 			Type:           "stage_dns",
 			Provider:       "cloudflare",

@@ -217,10 +217,13 @@ func TestCompileAddsManagedByTXTMarker(t *testing.T) {
 		t.Fatalf("marker = %#v, want TXT _workflow-dns-managed ttl 300", marker)
 	}
 	data, _ := marker["data"].(string)
-	for _, want := range []string{"heritage=wfinfra-v1", "managed_by=wfctl", "state_dir=.state/domain-intent-test/", "resource=cf-example-com"} {
+	for _, want := range []string{"heritage=wfinfra-v1", "managed_by=wfctl", "state_dir=.state/cloudflare-staging/", "resource=cf-example-com"} {
 		if !strings.Contains(data, want) {
 			t.Fatalf("marker data = %q, missing %q", data, want)
 		}
+	}
+	if strings.Contains(data, ".state/domain-intent-test/") {
+		t.Fatalf("marker data should not use domain reconcile state dir: %q", data)
 	}
 }
 
