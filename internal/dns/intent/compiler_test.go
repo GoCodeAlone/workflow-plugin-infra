@@ -291,6 +291,55 @@ func TestCompileAddsManagedByTXTMarker(t *testing.T) {
 	}
 }
 
+func TestCompileCanManageUnlistedCloudflareRecordsFromIntent(t *testing.T) {
+	dir := t.TempDir()
+	intentPath := writeTestFile(t, dir, "domains.json", `{
+  "schema": "workflow.domain-intent.v1",
+  "domains": {
+    "example.com": {
+      "registrar": "hover",
+      "dns_host": "cloudflare",
+      "stage_dns": true,
+      "manage_unlisted": true
+    }
+  }
+}`)
+	portfolioPath := writeTestFile(t, dir, "portfolio.json", `{
+  "schema": "workflow.dns-portfolio.export.v1",
+  "snapshots": [
+    {
+      "id": "cf",
+      "provider": "cloudflare",
+      "domain": "example.com",
+      "authority": {"name_servers": ["a.ns.cloudflare.com", "b.ns.cloudflare.com"]},
+      "records": []
+    },
+    {
+      "id": "hover",
+      "provider": "hover",
+      "domain": "example.com",
+      "records": [{"type": "A", "name": "@", "value": "192.0.2.10", "ttl": 300}]
+    }
+  ]
+}`)
+
+	bundle, err := Compile(Options{IntentPath: intentPath, PortfolioGlobs: []string{portfolioPath}})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	got := moduleByName(bundle.Config.Modules, "cf-example-com")
+	if got == nil {
+		t.Fatalf("missing generated Cloudflare module: %+v", bundle.Config.Modules)
+	}
+	if got.Config["manage_unlisted"] != true {
+		t.Fatalf("manage_unlisted = %#v, want true", got.Config["manage_unlisted"])
+	}
+	action := bundle.Report.Domains[0].Actions[0]
+	if action.ManageUnlisted == nil || *action.ManageUnlisted != true {
+		t.Fatalf("action manage_unlisted = %#v, want true", action.ManageUnlisted)
+	}
+}
+
 func TestCompileDiscardParkedBlocksNonParkedRecords(t *testing.T) {
 	dir := t.TempDir()
 	intentPath := writeTestFile(t, dir, "domains.json", `{

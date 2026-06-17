@@ -53,6 +53,8 @@ Generated Cloudflare DNS resources default website-capable `A`, `AAAA`, and
 `CNAME` records to `proxied: true` so moved zones keep Cloudflare edge features.
 Mail/service hostnames such as `mail`, `smtp`, `imap`, `autodiscover`,
 underscore-prefixed service records, and in-zone MX targets are kept DNS-only.
+Domain intent can set `manage_unlisted: true` for corrective cutovers where
+stale provider records should be deleted after the intended record set is known.
 
 Generated Cloudflare DNS resources include a TXT marker at
 `_workflow-dns-managed.<zone>` with `heritage=wfinfra-v1`, `managed_by=wfctl`,
