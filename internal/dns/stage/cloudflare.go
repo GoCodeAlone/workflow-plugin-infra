@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/GoCodeAlone/workflow-plugin-infra/internal/dns/defaults"
 	"github.com/GoCodeAlone/workflow-plugin-infra/internal/dns/managedmarker"
 	"github.com/GoCodeAlone/workflow-plugin-infra/internal/dns/record"
 	"github.com/GoCodeAlone/workflow/config"
@@ -64,7 +65,7 @@ func CompileCloudflare(opts CloudflareOptions) (*CloudflareBundle, error) {
 		return nil, fmt.Errorf("unsupported cloudflare stage scope %q (want safe or all)", opts.Scope)
 	}
 	if opts.StateDir == "" {
-		opts.StateDir = ".state/cloudflare-staging/"
+		opts.StateDir = defaults.CloudflareStagingStateDir
 	}
 	snapshots, err := loadSnapshots(opts.PortfolioGlobs)
 	if err != nil {

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoCodeAlone/workflow-plugin-infra/internal/dns/defaults"
 	"github.com/GoCodeAlone/workflow-plugin-infra/internal/dns/intent"
 	"github.com/GoCodeAlone/workflow-plugin-infra/internal/dns/record"
 	"github.com/GoCodeAlone/workflow-plugin-infra/internal/dns/stage"
@@ -409,7 +410,7 @@ func parseStageCloudflareOptions(args []string) (stageCloudflareOptions, error) 
 	fs.StringVar(&opts.outputPath, "output", "infra/cloudflare-staging.generated.wfctl.yaml", "Generated wfctl config path")
 	fs.StringVar(&opts.reportPath, "report", "reports/cloudflare-staging-report.json", "Generated JSON report path")
 	fs.StringVar(&opts.bundlePath, "bundle", "", "Optional combined JSON bundle path")
-	fs.StringVar(&opts.stateDir, "state-dir", ".state/cloudflare-staging/", "Filesystem state directory for generated iac.state")
+	fs.StringVar(&opts.stateDir, "state-dir", defaults.CloudflareStagingStateDir, "Filesystem state directory for generated iac.state")
 	if err := fs.Parse(args); err != nil {
 		return opts, err
 	}
