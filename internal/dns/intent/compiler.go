@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/GoCodeAlone/workflow-plugin-infra/internal/dns/defaults"
 	"github.com/GoCodeAlone/workflow-plugin-infra/internal/dns/managedmarker"
 	"github.com/GoCodeAlone/workflow-plugin-infra/internal/dns/record"
 	"github.com/GoCodeAlone/workflow/config"
@@ -253,7 +254,7 @@ func reconcileDomain(domain string, cfg DomainIntent, snapshots []record.Snapsho
 	var modules []config.ModuleConfig
 	if stageDNS(cfg) {
 		resource := resourceName("cf", domain)
-		records := managedmarker.Append(plan.records, stateDir, resource)
+		records := managedmarker.Append(plan.records, defaults.CloudflareStagingStateDir, resource)
 		report.Actions = append(report.Actions, Action{
 			Type:           "stage_dns",
 			Provider:       "cloudflare",
