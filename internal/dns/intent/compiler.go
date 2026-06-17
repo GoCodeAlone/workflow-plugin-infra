@@ -406,6 +406,7 @@ func planRecords(domain string, cfg DomainIntent, policy string, group []record.
 			return plan
 		}
 		plan.records = applyWebTarget(domain, plan.records, cfg)
+		plan.manageUnlisted = true
 		return plan
 	}
 	switch policy {

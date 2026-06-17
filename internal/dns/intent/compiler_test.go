@@ -424,6 +424,9 @@ func TestCompileWebTargetReplacesAuthoritativeWebRecords(t *testing.T) {
 	if !ok {
 		t.Fatalf("records = %T, want []map[string]any", got.Config["records"])
 	}
+	if got.Config["manage_unlisted"] != true {
+		t.Fatalf("manage_unlisted = %#v, want true for web target cutover", got.Config["manage_unlisted"])
+	}
 	target := "gocodealone-multisite-zeqkn.ondigitalocean.app"
 	for _, host := range []string{"@", "www", "*"} {
 		rec := recordByTypeName(records, "CNAME", host)
