@@ -448,6 +448,106 @@ func TestCompileWebTargetReplacesAuthoritativeWebRecords(t *testing.T) {
 	}
 }
 
+func TestCompileDiscardParkedWebTargetPreservesNonWebRecords(t *testing.T) {
+	dir := t.TempDir()
+	intentPath := writeTestFile(t, dir, "domains.json", `{
+  "schema": "workflow.domain-intent.v1",
+  "domains": {
+    "example.com": {
+      "registrar": "hover",
+      "dns_host": "cloudflare",
+      "records_policy": "discard_parked",
+      "web_target": "gocodealone-multisite-zeqkn.ondigitalocean.app",
+      "web_hosts": ["@", "*"]
+    }
+  }
+}`)
+	portfolioPath := writeTestFile(t, dir, "portfolio.json", `{
+  "schema": "workflow.dns-portfolio.export.v1",
+  "snapshots": [
+    {
+      "id": "cf",
+      "provider": "cloudflare",
+      "domain": "example.com",
+      "authority": {"name_servers": ["a.ns.cloudflare.com", "b.ns.cloudflare.com"]},
+      "records": []
+    },
+    {
+      "id": "hover",
+      "provider": "hover",
+      "domain": "example.com",
+      "records": [
+        {"type": "A", "name": "@", "value": "216.40.34.41", "ttl": 900},
+        {"type": "A", "name": "*", "value": "216.40.34.41", "ttl": 900},
+        {"type": "MX", "name": "@", "value": "10 mx.hover.com.cust.hostedemail.com", "ttl": 900},
+        {"type": "CNAME", "name": "mail", "value": "mail.hover.com.cust.hostedemail.com", "ttl": 900}
+      ]
+    }
+  ]
+}`)
+
+	bundle, err := Compile(Options{IntentPath: intentPath, PortfolioGlobs: []string{portfolioPath}})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	if bundle.Report.BlockedDomains != 0 {
+		t.Fatalf("blocked domains = %d; report=%+v", bundle.Report.BlockedDomains, bundle.Report)
+	}
+	got := moduleByName(bundle.Config.Modules, "cf-example-com")
+	if got == nil {
+		t.Fatalf("missing generated Cloudflare module: %+v", bundle.Config.Modules)
+	}
+	if got.Config["manage_unlisted"] != true {
+		t.Fatalf("manage_unlisted = %#v, want true", got.Config["manage_unlisted"])
+	}
+	records := got.Config["records"].([]map[string]any)
+	if mx := recordByTypeName(records, "MX", "@"); mx == nil {
+		t.Fatalf("MX record was not preserved: %#v", records)
+	}
+	if mail := recordByTypeName(records, "CNAME", "mail"); mail == nil {
+		t.Fatalf("mail CNAME was not preserved: %#v", records)
+	}
+	for _, host := range []string{"@", "*"} {
+		if web := recordByTypeName(records, "CNAME", host); web == nil || web["proxied"] != true {
+			t.Fatalf("web target record %s = %#v", host, web)
+		}
+	}
+}
+
+func TestCompileWebTargetBlocksEmptyWebHosts(t *testing.T) {
+	dir := t.TempDir()
+	intentPath := writeTestFile(t, dir, "domains.json", `{
+  "schema": "workflow.domain-intent.v1",
+  "domains": {
+    "example.com": {
+      "registrar": "hover",
+      "dns_host": "cloudflare",
+      "web_target": "gocodealone-multisite-zeqkn.ondigitalocean.app",
+      "web_hosts": [" ", "."]
+    }
+  }
+}`)
+	portfolioPath := writeTestFile(t, dir, "portfolio.json", `{
+  "schema": "workflow.dns-portfolio.export.v1",
+  "snapshots": [
+    {"id": "cf", "provider": "cloudflare", "domain": "example.com", "authority": {"name_servers": ["a.ns.cloudflare.com", "b.ns.cloudflare.com"]}},
+    {"id": "hover", "provider": "hover", "domain": "example.com", "records": [{"type": "A", "name": "@", "value": "192.0.2.44", "ttl": 900}]}
+  ]
+}`)
+
+	bundle, err := Compile(Options{IntentPath: intentPath, PortfolioGlobs: []string{portfolioPath}})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	if bundle.Report.BlockedDomains != 1 {
+		t.Fatalf("blocked domains = %d, want 1; report=%+v", bundle.Report.BlockedDomains, bundle.Report)
+	}
+	got := strings.Join(bundle.Report.Domains[0].Blockers, "\n")
+	if !strings.Contains(got, "web_hosts") {
+		t.Fatalf("blockers = %q, want web_hosts error", got)
+	}
+}
+
 func TestCompilePreserveAuthoritativeNormalizesCloudflareRecords(t *testing.T) {
 	dir := t.TempDir()
 	intentPath := writeTestFile(t, dir, "domains.json", `{

@@ -241,6 +241,9 @@ func reconcileDomain(domain string, cfg DomainIntent, snapshots []record.Snapsho
 		if normalized := normalizeWebTarget(cfg.WebTarget); normalized == "" {
 			blockers = append(blockers, "web_target must be a non-empty DNS name")
 		}
+		if len(webHostSet(domain, cfg)) == 0 {
+			blockers = append(blockers, "web_hosts must contain at least one valid host when web_target is set")
+		}
 	}
 
 	plan := recordPlan{}
@@ -408,10 +411,13 @@ func planRecords(domain string, cfg DomainIntent, policy string, group []record.
 	switch policy {
 	case "discard_parked":
 		if hasHover && parkedHoverRecords(hoverSnapshot.Records) {
-			return withWebTarget(recordPlan{records: redirectProxyRecordsIfNeeded(domain, cfg), manageUnlisted: true})
+			return withWebTarget(discardParkedPlan(domain, cfg, hoverSnapshot.Records))
 		}
 		if cfg.AllowDiscardNonparked {
-			return withWebTarget(recordPlan{records: redirectProxyRecordsIfNeeded(domain, cfg), manageUnlisted: true})
+			if selected, ok := selectSource(group); ok {
+				return withWebTarget(discardParkedPlan(domain, cfg, selected.Records))
+			}
+			return recordPlan{blockers: []string{"no portfolio snapshot available for records"}}
 		}
 		return recordPlan{blockers: []string{"records_policy discard_parked requested but Hover records do not match parked-record pattern"}}
 	case "preserve_authoritative":
@@ -427,6 +433,13 @@ func planRecords(domain string, cfg DomainIntent, policy string, group []record.
 	default:
 		return recordPlan{blockers: []string{fmt.Sprintf("unsupported records_policy %q", policy)}}
 	}
+}
+
+func discardParkedPlan(domain string, cfg DomainIntent, records []record.Record) recordPlan {
+	if strings.TrimSpace(cfg.WebTarget) != "" {
+		return recordPlan{records: cloudflareRecords(domain, records), manageUnlisted: true}
+	}
+	return recordPlan{records: redirectProxyRecordsIfNeeded(domain, cfg), manageUnlisted: true}
 }
 
 func validateForwardTarget(raw string) error {
