@@ -45,5 +45,9 @@ func field(value string) string {
 func isMarker(record map[string]any) bool {
 	recordType, _ := record["type"].(string)
 	name, _ := record["name"].(string)
-	return strings.EqualFold(recordType, Type) && strings.EqualFold(strings.TrimSuffix(name, "."), Name)
+	if !strings.EqualFold(recordType, Type) {
+		return false
+	}
+	normalizedName := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(name), "."))
+	return normalizedName == Name || strings.HasPrefix(normalizedName, Name+".")
 }
