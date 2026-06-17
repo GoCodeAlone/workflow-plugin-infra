@@ -43,7 +43,24 @@ jobs:
           echo "${RUNNER_TEMP}/wfctl-bin" >> "$GITHUB_PATH"
       - name: Validate plugin contract for publish (pre-build)
         run: "wfctl plugin validate-contract --for-publish --tag ${{ github.ref_name }} ."
+      - name: Build UI assets for release
+        timeout-minutes: 10
+        env:
+          npm_config_audit: "false"
+          npm_config_fund: "false"
+          npm_config_progress: "false"
+        run: |
+          set -euo pipefail
+          echo "Installing UI dependencies..."
+          npm ci --prefix ui --no-audit --no-fund
+          echo "Building UI assets..."
+          npm run build --prefix ui
+          rm -rf internal/ui_dist
+          cp -r ui/dist internal/ui_dist
+          echo "Built UI assets:"
+          find internal/ui_dist -maxdepth 2 -type f | sort | sed -n '1,40p'
       - name: Run GoReleaser
+        timeout-minutes: 10
         uses: goreleaser/goreleaser-action@5daf1e915a5f0af01ddbcd89a43b8061ff4f1a89 # v7.2.2
         with:
           version: "~> v2"
