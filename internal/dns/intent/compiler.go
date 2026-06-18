@@ -41,6 +41,8 @@ type DomainIntent struct {
 	ForwardHosts               []string `json:"forward_hosts,omitempty" yaml:"forward_hosts,omitempty"`
 	WebTarget                  string   `json:"web_target,omitempty" yaml:"web_target,omitempty"`
 	WebHosts                   []string `json:"web_hosts,omitempty" yaml:"web_hosts,omitempty"`
+	DNSOnlyHosts               []string `json:"dns_only_hosts,omitempty" yaml:"dns_only_hosts,omitempty"`
+	ProxiedHosts               []string `json:"proxied_hosts,omitempty" yaml:"proxied_hosts,omitempty"`
 	ManageUnlisted             *bool    `json:"manage_unlisted,omitempty" yaml:"manage_unlisted,omitempty"`
 }
 
@@ -464,14 +466,14 @@ func planRecords(domain string, cfg DomainIntent, policy string, group []record.
 		if selected, ok := selectSource(group); ok {
 			return withForwardTo(withWebTarget(recordPlan{records: cloudflareRecords(domain, cloudflarerecords.EffectiveRecordSource(domain, group, selected, selected.Records, func(snapshot record.Snapshot) int {
 				return sourceRank(snapshot, group)
-			}))}))
+			}), cfg)}))
 		}
 		return recordPlan{blockers: []string{"no portfolio snapshot available for records"}}
 	case "preserve_cloudflare":
 		if cfSnapshot.Provider != "" {
 			return withForwardTo(withWebTarget(recordPlan{records: cloudflareRecords(domain, cloudflarerecords.EffectiveRecordSource(domain, group, cfSnapshot, cfSnapshot.Records, func(snapshot record.Snapshot) int {
 				return sourceRank(snapshot, group)
-			}))}))
+			}), cfg)}))
 		}
 		return recordPlan{blockers: []string{"records_policy preserve_cloudflare requested but no Cloudflare snapshot exists"}}
 	default:
@@ -481,7 +483,7 @@ func planRecords(domain string, cfg DomainIntent, policy string, group []record.
 
 func discardParkedPlan(domain string, cfg DomainIntent, records []record.Record) recordPlan {
 	if strings.TrimSpace(cfg.WebTarget) != "" {
-		return recordPlan{records: cloudflareRecords(domain, records), manageUnlisted: true}
+		return recordPlan{records: cloudflareRecords(domain, records, cfg), manageUnlisted: true}
 	}
 	return recordPlan{records: redirectProxyRecordsIfNeeded(domain, cfg), manageUnlisted: true}
 }
@@ -530,7 +532,7 @@ func forwardPlaceholderRecords(domain string, cfg DomainIntent) []map[string]any
 			"name":    host.label,
 			"data":    "192.0.2.1",
 			"ttl":     1,
-			"proxied": true,
+			"proxied": proxySettingForHost(domain, "A", host.label, cfg, true),
 			"comment": "Originless placeholder for Cloudflare redirect rules",
 		})
 	}
@@ -600,7 +602,7 @@ func applyWebTarget(domain string, records []map[string]any, cfg DomainIntent) [
 			"name":    host,
 			"data":    target,
 			"ttl":     1,
-			"proxied": true,
+			"proxied": proxySettingForHost(domain, "CNAME", host, cfg, true),
 		})
 	}
 	sort.SliceStable(out, func(i, j int) bool {
@@ -861,7 +863,7 @@ func parkedHoverRecords(records []record.Record) bool {
 	return true
 }
 
-func cloudflareRecords(domain string, records []record.Record) []map[string]any {
+func cloudflareRecords(domain string, records []record.Record, cfg DomainIntent) []map[string]any {
 	out := make([]map[string]any, 0, len(records))
 	seen := map[string]bool{}
 	dnsOnlyNames := cloudflareDNSOnlyNames(domain, records)
@@ -894,8 +896,8 @@ func cloudflareRecords(domain string, records []record.Record) []map[string]any 
 			"data": data,
 			"ttl":  ttl,
 		}
-		if shouldProxyCloudflareRecord(recType, name, dnsOnlyNames) {
-			item["proxied"] = true
+		if proxied, ok := proxySettingForRecord(domain, recType, name, dnsOnlyNames, rec, cfg); ok {
+			item["proxied"] = proxied
 		}
 		if recType == "MX" || recType == "SRV" {
 			item["priority"] = priority
@@ -958,6 +960,46 @@ func shouldProxyCloudflareRecord(recType, name string, dnsOnlyNames map[string]b
 		return false
 	}
 	return true
+}
+
+func proxySettingForRecord(domain, recType, name string, dnsOnlyNames map[string]bool, rec record.Record, cfg DomainIntent) (bool, bool) {
+	if proxied, ok := proxyOverrideForHost(domain, name, cfg); ok {
+		return proxied, true
+	}
+	if rec.Proxied != nil {
+		return *rec.Proxied, true
+	}
+	if shouldProxyCloudflareRecord(recType, name, dnsOnlyNames) {
+		return true, true
+	}
+	return false, false
+}
+
+func proxySettingForHost(domain, recType, name string, cfg DomainIntent, fallback bool) bool {
+	if proxied, ok := proxyOverrideForHost(domain, name, cfg); ok {
+		return proxied
+	}
+	switch strings.ToUpper(recType) {
+	case "A", "AAAA", "CNAME":
+		return fallback
+	default:
+		return false
+	}
+}
+
+func proxyOverrideForHost(domain, name string, cfg DomainIntent) (bool, bool) {
+	normalized := normalizeWebHost(domain, defaultName(name))
+	for _, host := range cfg.DNSOnlyHosts {
+		if normalizeWebHost(domain, host) == normalized {
+			return false, true
+		}
+	}
+	for _, host := range cfg.ProxiedHosts {
+		if normalizeWebHost(domain, host) == normalized {
+			return true, true
+		}
+	}
+	return false, false
 }
 
 func recordDataAndPriority(rec record.Record) (string, int) {
