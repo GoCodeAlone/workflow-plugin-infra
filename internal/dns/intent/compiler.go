@@ -506,9 +506,10 @@ func redirectProxyRecordsIfNeeded(domain string, cfg DomainIntent) []map[string]
 
 func applyForwardPlaceholderRecords(domain string, records []map[string]any, cfg DomainIntent) []map[string]any {
 	hosts := forwardHostSet(domain, cfg)
+	labels := hostsToLabels(hosts)
 	out := make([]map[string]any, 0, len(records)+len(hosts))
 	for _, item := range records {
-		if isWebRecordForHost(domain, item, hostsToLabels(hosts)) {
+		if isWebRecordForHost(domain, item, labels) {
 			continue
 		}
 		out = append(out, item)

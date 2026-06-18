@@ -151,7 +151,7 @@ func TestCompileNamecheapCutoverProducesDelegationResource(t *testing.T) {
 	}
 }
 
-func TestCompileForwardToProducesCloudflareRedirectResource(t *testing.T) {
+func TestCompileForwardToProducesCloudflareRedirectResourcesForForwardHosts(t *testing.T) {
 	dir := t.TempDir()
 	intentPath := writeTestFile(t, dir, "domains.json", `{
   "schema": "workflow.domain-intent.v1",
@@ -245,6 +245,75 @@ func TestCompileForwardToProducesCloudflareRedirectResource(t *testing.T) {
 	}
 	if wwwRedirect.Config["target_url"] != "http://example.com" {
 		t.Fatalf("www target_url = %#v", wwwRedirect.Config["target_url"])
+	}
+}
+
+func TestCompileForwardToDefaultsToApexRedirectHost(t *testing.T) {
+	dir := t.TempDir()
+	intentPath := writeTestFile(t, dir, "domains.json", `{
+  "schema": "workflow.domain-intent.v1",
+  "domains": {
+    "example.net": {
+      "registrar": "hover",
+      "dns_host": "cloudflare",
+      "records_policy": "discard_parked",
+      "forward_to": "http://example.com"
+    }
+  }
+}`)
+	portfolioPath := writeTestFile(t, dir, "portfolio.json", `{
+  "schema": "workflow.dns-portfolio.export.v1",
+  "snapshots": [
+    {
+      "id": "cf-example-net",
+      "provider": "cloudflare",
+      "domain": "example.net",
+      "authority": {"name_servers": ["ada.ns.cloudflare.com", "bob.ns.cloudflare.com"]},
+      "records": []
+    },
+    {
+      "id": "hover-example-net",
+      "provider": "hover",
+      "domain": "example.net",
+      "authority": {"registrar_nameservers": ["ada.ns.cloudflare.com", "bob.ns.cloudflare.com"]},
+      "records": [
+        {"type": "A", "name": "@", "value": "216.40.34.41", "ttl": 900},
+        {"type": "A", "name": "*", "value": "216.40.34.41", "ttl": 900},
+        {"type": "MX", "name": "@", "value": "10 mx.hover.com.cust.hostedemail.com", "ttl": 900}
+      ]
+    }
+  ]
+}`)
+
+	bundle, err := Compile(Options{IntentPath: intentPath, PortfolioGlobs: []string{portfolioPath}})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	if bundle.Report.BlockedDomains != 0 {
+		t.Fatalf("blocked domains = %d; report=%+v", bundle.Report.BlockedDomains, bundle.Report)
+	}
+	if bundle.Report.ActionCount != 2 {
+		t.Fatalf("action count = %d, want stage_dns + one configure_redirect", bundle.Report.ActionCount)
+	}
+	dns := moduleByName(bundle.Config.Modules, "cf-example-net")
+	if dns == nil {
+		t.Fatalf("missing cloudflare DNS module: %+v", bundle.Config.Modules)
+	}
+	records, ok := dns.Config["records"].([]map[string]any)
+	if !ok {
+		t.Fatalf("records = %T, want []map[string]any", dns.Config["records"])
+	}
+	if placeholder := recordByTypeName(records, "A", "@"); placeholder == nil || placeholder["data"] != "192.0.2.1" {
+		t.Fatalf("apex placeholder = %#v", placeholder)
+	}
+	if placeholder := recordByTypeName(records, "A", "www"); placeholder != nil {
+		t.Fatalf("www placeholder must not be emitted by default: %#v", placeholder)
+	}
+	if redirect := moduleByName(bundle.Config.Modules, "cf-redirect-example-net"); redirect == nil {
+		t.Fatalf("missing apex redirect module: %+v", bundle.Config.Modules)
+	}
+	if redirect := moduleByName(bundle.Config.Modules, "cf-redirect-www-example-net"); redirect != nil {
+		t.Fatalf("www redirect must not be emitted by default: %#v", redirect)
 	}
 }
 
