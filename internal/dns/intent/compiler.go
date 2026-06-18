@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/GoCodeAlone/workflow-plugin-infra/internal/dns/cloudflarerecords"
 	"github.com/GoCodeAlone/workflow-plugin-infra/internal/dns/defaults"
 	"github.com/GoCodeAlone/workflow-plugin-infra/internal/dns/managedmarker"
 	"github.com/GoCodeAlone/workflow-plugin-infra/internal/dns/record"
@@ -442,12 +443,16 @@ func planRecords(domain string, cfg DomainIntent, policy string, group []record.
 		return recordPlan{blockers: []string{"records_policy discard_parked requested but Hover records do not match parked-record pattern"}}
 	case "preserve_authoritative":
 		if selected, ok := selectSource(group); ok {
-			return withWebTarget(recordPlan{records: cloudflareRecords(domain, selected.Records)})
+			return withWebTarget(recordPlan{records: cloudflareRecords(domain, cloudflarerecords.EffectiveRecordSource(domain, group, selected, selected.Records, func(snapshot record.Snapshot) int {
+				return sourceRank(snapshot, group)
+			}))})
 		}
 		return recordPlan{blockers: []string{"no portfolio snapshot available for records"}}
 	case "preserve_cloudflare":
 		if cfSnapshot.Provider != "" {
-			return withWebTarget(recordPlan{records: cloudflareRecords(domain, cfSnapshot.Records)})
+			return withWebTarget(recordPlan{records: cloudflareRecords(domain, cloudflarerecords.EffectiveRecordSource(domain, group, cfSnapshot, cfSnapshot.Records, func(snapshot record.Snapshot) int {
+				return sourceRank(snapshot, group)
+			}))})
 		}
 		return recordPlan{blockers: []string{"records_policy preserve_cloudflare requested but no Cloudflare snapshot exists"}}
 	default:
@@ -776,7 +781,7 @@ func cloudflareRecords(domain string, records []record.Record) []map[string]any 
 		if !supportedCloudflareType(recType) {
 			continue
 		}
-		name := defaultName(rec.Name)
+		name := cloudflarerecords.CloudflareName(domain, rec.Name)
 		normalizedName := normalizeDomain(name)
 		if recType == "NS" && (name == "@" || normalizedName == domain) {
 			continue
@@ -860,19 +865,10 @@ func shouldProxyCloudflareRecord(recType, name string, dnsOnlyNames map[string]b
 		return false
 	}
 	normalized := normalizeDomain(defaultName(name))
-	if normalized == "" || dnsOnlyNames[normalized] || containsUnderscoreLabel(normalized) {
+	if normalized == "" || dnsOnlyNames[normalized] || cloudflarerecords.ContainsUnderscoreLabel(normalized) {
 		return false
 	}
 	return true
-}
-
-func containsUnderscoreLabel(name string) bool {
-	for _, label := range strings.Split(name, ".") {
-		if strings.HasPrefix(label, "_") {
-			return true
-		}
-	}
-	return false
 }
 
 func recordDataAndPriority(rec record.Record) (string, int) {

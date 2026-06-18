@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/GoCodeAlone/workflow-plugin-infra/internal/dns/record"
+	"github.com/GoCodeAlone/workflow/config"
 )
 
 func TestCompileCloudflareAddsManagedByTXTMarker(t *testing.T) {
@@ -267,6 +268,68 @@ func TestCloudflareRecordsDefaultsProxiableRecordsToProxied(t *testing.T) {
 	}
 }
 
+func TestCompileCloudflareReplacesParkedWebRecordsWithAlternateLiveSource(t *testing.T) {
+	dir := t.TempDir()
+	portfolioPath := filepath.Join(dir, "portfolio.json")
+	if err := os.WriteFile(portfolioPath, []byte(`{
+  "schema": "workflow.dns-portfolio.export.v1",
+  "snapshots": [
+    {
+      "id": "cf",
+      "provider": "cloudflare",
+      "domain": "example.com",
+      "authority": {"name_servers": ["a.ns.cloudflare.com", "b.ns.cloudflare.com"]},
+      "records": [
+        {"type": "A", "name": "example.com", "value": "216.40.34.41", "ttl": 900},
+        {"type": "A", "name": "*.example.com", "value": "216.40.34.41", "ttl": 900},
+        {"type": "CNAME", "name": "mail.example.com", "value": "mail.hover.com.cust.hostedemail.com", "ttl": 900},
+        {"type": "MX", "name": "example.com", "value": "10 mx.hover.com.cust.hostedemail.com", "ttl": 900}
+      ]
+    },
+    {
+      "id": "do",
+      "provider": "digitalocean",
+      "domain": "example.com",
+      "authority": {"name_servers": ["ns1.digitalocean.com", "ns2.digitalocean.com", "ns3.digitalocean.com"]},
+      "records": [
+        {"type": "A", "name": "@", "value": "203.0.113.20", "ttl": 1800},
+        {"type": "NS", "name": "@", "value": "ns1.digitalocean.com", "ttl": 1800},
+        {"type": "SOA", "name": "@", "value": "ns1.digitalocean.com hostmaster.example.com 1 10800 3600 604800 1800", "ttl": 1800}
+      ]
+    }
+  ]
+}`), 0o644); err != nil {
+		t.Fatalf("write portfolio: %v", err)
+	}
+
+	bundle, err := CompileCloudflare(CloudflareOptions{
+		PortfolioGlobs: []string{portfolioPath},
+		Scope:          "all",
+		StateDir:       ".state/cloudflare-staging-test/",
+	})
+	if err != nil {
+		t.Fatalf("CompileCloudflare: %v", err)
+	}
+	got := moduleByName(bundle.Config.Modules, "cf-example-com")
+	if got == nil {
+		t.Fatalf("missing generated Cloudflare module: %+v", bundle.Config.Modules)
+	}
+	records := got.Config["records"].([]map[string]any)
+	if parked := stageRecordByTypeData(records, "A", "216.40.34.41"); parked != nil {
+		t.Fatalf("parked A record preserved: %#v in %#v", parked, records)
+	}
+	apex := stageRecordByTypeName(records, "A", "@")
+	if apex == nil || apex["data"] != "203.0.113.20" || apex["proxied"] != true {
+		t.Fatalf("apex A = %#v, want proxied DigitalOcean record", apex)
+	}
+	if mail := stageRecordByTypeName(records, "CNAME", "mail"); mail == nil || mail["data"] != "mail.hover.com.cust.hostedemail.com" {
+		t.Fatalf("mail CNAME = %#v, want preserved Hover mail target", mail)
+	}
+	if mx := stageRecordByTypeName(records, "MX", "@"); mx == nil || mx["data"] != "mx.hover.com.cust.hostedemail.com" {
+		t.Fatalf("MX = %#v, want preserved Hover MX", mx)
+	}
+}
+
 func TestCloudflareRecordsKeepApexMXTargetDNSOnly(t *testing.T) {
 	records := cloudflareRecords("example.com", []record.Record{
 		{Type: "A", Name: "@", Value: "192.0.2.10", TTL: 300},
@@ -285,6 +348,24 @@ func TestCloudflareRecordsKeepApexMXTargetDNSOnly(t *testing.T) {
 func stageRecordByTypeName(records []map[string]any, recordType, name string) map[string]any {
 	for _, rec := range records {
 		if rec["type"] == recordType && rec["name"] == name {
+			return rec
+		}
+	}
+	return nil
+}
+
+func moduleByName(modules []config.ModuleConfig, name string) *config.ModuleConfig {
+	for i := range modules {
+		if modules[i].Name == name {
+			return &modules[i]
+		}
+	}
+	return nil
+}
+
+func stageRecordByTypeData(records []map[string]any, recordType, data string) map[string]any {
+	for _, rec := range records {
+		if rec["type"] == recordType && rec["data"] == data {
 			return rec
 		}
 	}

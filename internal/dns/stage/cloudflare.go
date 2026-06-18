@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/GoCodeAlone/workflow-plugin-infra/internal/dns/cloudflarerecords"
 	"github.com/GoCodeAlone/workflow-plugin-infra/internal/dns/defaults"
 	"github.com/GoCodeAlone/workflow-plugin-infra/internal/dns/managedmarker"
 	"github.com/GoCodeAlone/workflow-plugin-infra/internal/dns/record"
@@ -207,6 +208,9 @@ func buildStagedDomain(domain string, group []record.Snapshot, stateDir string) 
 	if strings.EqualFold(source.Provider, "cloudflare") && currentAuthoritySource.Provider != "" && !strings.EqualFold(currentAuthoritySource.Provider, "cloudflare") {
 		recordSource = append(append([]record.Record(nil), source.Records...), currentAuthoritySource.Records...)
 	}
+	recordSource = cloudflarerecords.EffectiveRecordSource(domain, group, source, recordSource, func(snapshot record.Snapshot) int {
+		return sourceRank(snapshot, group)
+	})
 	records := managedmarker.Append(cloudflareRecords(domain, recordSource), stateDir, resource)
 	report := CloudflareDomainReport{
 		Domain:                   domain,
@@ -385,7 +389,7 @@ func cloudflareRecords(domain string, records []record.Record) []map[string]any 
 		if !supportedCloudflareType(recType) {
 			continue
 		}
-		name := cloudflareRecordName(domain, rec.Name)
+		name := cloudflarerecords.CloudflareName(domain, rec.Name)
 		if recType == "NS" && (name == "@" || normalizeDomain(name) == domain) {
 			continue
 		}
@@ -468,19 +472,10 @@ func shouldProxyCloudflareRecord(recType, name string, dnsOnlyNames map[string]b
 		return false
 	}
 	normalized := normalizeDomain(defaultName(name))
-	if normalized == "" || dnsOnlyNames[normalized] || containsUnderscoreLabel(normalized) {
+	if normalized == "" || dnsOnlyNames[normalized] || cloudflarerecords.ContainsUnderscoreLabel(normalized) {
 		return false
 	}
 	return true
-}
-
-func containsUnderscoreLabel(name string) bool {
-	for _, label := range strings.Split(name, ".") {
-		if strings.HasPrefix(label, "_") {
-			return true
-		}
-	}
-	return false
 }
 
 func recordDataAndPriority(rec record.Record) (string, int) {
@@ -530,22 +525,6 @@ func supportedCloudflareType(recType string) bool {
 func defaultName(name string) string {
 	if strings.TrimSpace(name) == "" {
 		return "@"
-	}
-	return name
-}
-
-func cloudflareRecordName(domain, name string) string {
-	name = strings.TrimSuffix(strings.TrimSpace(defaultName(name)), ".")
-	if name == "@" {
-		return "@"
-	}
-	normalizedName := normalizeDomain(name)
-	if normalizedName == domain {
-		return "@"
-	}
-	suffix := "." + domain
-	if strings.HasSuffix(normalizedName, suffix) {
-		return strings.TrimSuffix(normalizedName, suffix)
 	}
 	return name
 }
