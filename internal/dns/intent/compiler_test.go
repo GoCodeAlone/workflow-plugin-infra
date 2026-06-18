@@ -160,7 +160,8 @@ func TestCompileForwardToProducesCloudflareRedirectResource(t *testing.T) {
       "registrar": "hover",
       "dns_host": "cloudflare",
       "records_policy": "discard_parked",
-      "forward_to": "http://example.com"
+      "forward_to": "http://example.com",
+      "forward_hosts": ["@", "www"]
     }
   }
 }`)
@@ -196,19 +197,25 @@ func TestCompileForwardToProducesCloudflareRedirectResource(t *testing.T) {
 	if bundle.Report.BlockedDomains != 0 {
 		t.Fatalf("blocked domains = %d; report=%+v", bundle.Report.BlockedDomains, bundle.Report)
 	}
-	if bundle.Report.ActionCount != 2 {
-		t.Fatalf("action count = %d, want stage_dns + configure_redirect", bundle.Report.ActionCount)
+	if bundle.Report.ActionCount != 3 {
+		t.Fatalf("action count = %d, want stage_dns + two configure_redirect actions", bundle.Report.ActionCount)
 	}
 	dns := moduleByName(bundle.Config.Modules, "cf-example-net")
 	if dns == nil {
 		t.Fatalf("missing cloudflare DNS module: %+v", bundle.Config.Modules)
 	}
 	records, ok := dns.Config["records"].([]map[string]any)
-	if !ok || len(records) != 2 || managedMarkerRecord(records) == nil {
-		t.Fatalf("dns records = %#v, want originless placeholder plus managed marker", dns.Config["records"])
+	if !ok || len(records) != 3 || managedMarkerRecord(records) == nil {
+		t.Fatalf("dns records = %#v, want two originless placeholders plus managed marker", dns.Config["records"])
 	}
-	if records[0]["type"] != "A" || records[0]["name"] != "@" || records[0]["data"] != "192.0.2.1" || records[0]["proxied"] != true {
-		t.Fatalf("placeholder record = %#v", records[0])
+	for _, host := range []string{"@", "www"} {
+		placeholder := recordByTypeName(records, "A", host)
+		if placeholder == nil {
+			t.Fatalf("missing placeholder record %s in %#v", host, records)
+		}
+		if placeholder["data"] != "192.0.2.1" || placeholder["proxied"] != true {
+			t.Fatalf("placeholder record %s = %#v", host, placeholder)
+		}
 	}
 	redirect := moduleByName(bundle.Config.Modules, "cf-redirect-example-net")
 	if redirect == nil {
@@ -228,6 +235,87 @@ func TestCompileForwardToProducesCloudflareRedirectResource(t *testing.T) {
 	}
 	if redirect.Config["status_code"] != 301 {
 		t.Fatalf("status_code = %#v", redirect.Config["status_code"])
+	}
+	wwwRedirect := moduleByName(bundle.Config.Modules, "cf-redirect-www-example-net")
+	if wwwRedirect == nil {
+		t.Fatalf("missing www redirect module: %+v", bundle.Config.Modules)
+	}
+	if wwwRedirect.Config["domain"] != "example.net" || wwwRedirect.Config["from_host"] != "www.example.net" {
+		t.Fatalf("www redirect config = %#v", wwwRedirect.Config)
+	}
+	if wwwRedirect.Config["target_url"] != "http://example.com" {
+		t.Fatalf("www target_url = %#v", wwwRedirect.Config["target_url"])
+	}
+}
+
+func TestCompileForwardToPreservesUnlistedHostsOutsideForwardHosts(t *testing.T) {
+	dir := t.TempDir()
+	intentPath := writeTestFile(t, dir, "domains.json", `{
+  "schema": "workflow.domain-intent.v1",
+  "domains": {
+    "example.tech": {
+      "registrar": "hover",
+      "dns_host": "cloudflare",
+      "forward_to": "https://example.com",
+      "forward_hosts": ["@", "www"]
+    }
+  }
+}`)
+	portfolioPath := writeTestFile(t, dir, "portfolio.json", `{
+  "schema": "workflow.dns-portfolio.export.v1",
+  "snapshots": [
+    {
+      "id": "cf-example-tech",
+      "provider": "cloudflare",
+      "domain": "example.tech",
+      "authority": {"name_servers": ["ada.ns.cloudflare.com", "bob.ns.cloudflare.com"]},
+      "records": [
+        {"type": "A", "name": "@", "value": "162.159.140.98", "ttl": 300},
+        {"type": "AAAA", "name": "@", "value": "2606:4700:7::60", "ttl": 300},
+        {"type": "CNAME", "name": "www", "value": "example-host.ondigitalocean.app", "ttl": 300},
+        {"type": "CNAME", "name": "admin", "value": "example-host.ondigitalocean.app", "ttl": 300},
+        {"type": "CNAME", "name": "*.preview", "value": "example-host.ondigitalocean.app", "ttl": 300}
+      ]
+    }
+  ]
+}`)
+
+	bundle, err := Compile(Options{IntentPath: intentPath, PortfolioGlobs: []string{portfolioPath}})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	if bundle.Report.BlockedDomains != 0 {
+		t.Fatalf("blocked domains = %d; report=%+v", bundle.Report.BlockedDomains, bundle.Report)
+	}
+	dns := moduleByName(bundle.Config.Modules, "cf-example-tech")
+	if dns == nil {
+		t.Fatalf("missing cloudflare DNS module: %+v", bundle.Config.Modules)
+	}
+	records, ok := dns.Config["records"].([]map[string]any)
+	if !ok {
+		t.Fatalf("records = %T, want []map[string]any", dns.Config["records"])
+	}
+	for _, host := range []string{"@", "www"} {
+		placeholder := recordByTypeName(records, "A", host)
+		if placeholder == nil || placeholder["data"] != "192.0.2.1" || placeholder["proxied"] != true {
+			t.Fatalf("placeholder record %s = %#v", host, placeholder)
+		}
+	}
+	if stale := recordByTypeName(records, "AAAA", "@"); stale != nil {
+		t.Fatalf("stale apex AAAA retained: %#v", stale)
+	}
+	if admin := recordByTypeName(records, "CNAME", "admin"); admin == nil || admin["data"] != "example-host.ondigitalocean.app" {
+		t.Fatalf("admin CNAME = %#v, want preserved", admin)
+	}
+	if preview := recordByTypeName(records, "CNAME", "*.preview"); preview == nil || preview["data"] != "example-host.ondigitalocean.app" {
+		t.Fatalf("preview CNAME = %#v, want preserved", preview)
+	}
+	if moduleByName(bundle.Config.Modules, "cf-redirect-admin-example-tech") != nil {
+		t.Fatalf("admin redirect must not be emitted: %+v", bundle.Config.Modules)
+	}
+	if moduleByName(bundle.Config.Modules, "cf-redirect-example-tech") == nil ||
+		moduleByName(bundle.Config.Modules, "cf-redirect-www-example-tech") == nil {
+		t.Fatalf("apex and www redirect modules must be emitted: %+v", bundle.Config.Modules)
 	}
 }
 
