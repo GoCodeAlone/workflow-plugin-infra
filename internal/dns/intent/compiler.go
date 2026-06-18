@@ -38,6 +38,7 @@ type DomainIntent struct {
 	ExpectedCurrentNameservers []string `json:"expected_current_nameservers,omitempty" yaml:"expected_current_nameservers,omitempty"`
 	AllowDiscardNonparked      bool     `json:"allow_discard_nonparked,omitempty" yaml:"allow_discard_nonparked,omitempty"`
 	ForwardTo                  string   `json:"forward_to,omitempty" yaml:"forward_to,omitempty"`
+	ForwardHosts               []string `json:"forward_hosts,omitempty" yaml:"forward_hosts,omitempty"`
 	WebTarget                  string   `json:"web_target,omitempty" yaml:"web_target,omitempty"`
 	WebHosts                   []string `json:"web_hosts,omitempty" yaml:"web_hosts,omitempty"`
 	ManageUnlisted             *bool    `json:"manage_unlisted,omitempty" yaml:"manage_unlisted,omitempty"`
@@ -80,6 +81,7 @@ type Action struct {
 	ManageUnlisted             *bool    `json:"manage_unlisted,omitempty" yaml:"manage_unlisted,omitempty"`
 	RecordsPolicy              string   `json:"records_policy,omitempty" yaml:"records_policy,omitempty"`
 	TargetURL                  string   `json:"target_url,omitempty" yaml:"target_url,omitempty"`
+	FromHost                   string   `json:"from_host,omitempty" yaml:"from_host,omitempty"`
 	DesiredNameservers         []string `json:"desired_nameservers,omitempty" yaml:"desired_nameservers,omitempty"`
 	ExpectedCurrentNameservers []string `json:"expected_current_nameservers,omitempty" yaml:"expected_current_nameservers,omitempty"`
 }
@@ -235,10 +237,16 @@ func reconcileDomain(domain string, cfg DomainIntent, snapshots []record.Snapsho
 		if err := validateForwardTarget(cfg.ForwardTo); err != nil {
 			blockers = append(blockers, err.Error())
 		}
+		if len(forwardHostSet(domain, cfg)) == 0 {
+			blockers = append(blockers, "forward_hosts must contain at least one valid host when forward_to is set")
+		}
 	}
 	if strings.TrimSpace(cfg.WebTarget) != "" {
 		if desiredDNSHost != "cloudflare" {
 			blockers = append(blockers, "web_target is only supported for dns_host cloudflare")
+		}
+		if strings.TrimSpace(cfg.ForwardTo) != "" {
+			blockers = append(blockers, "web_target cannot be combined with forward_to")
 		}
 		if normalized := normalizeWebTarget(cfg.WebTarget); normalized == "" {
 			blockers = append(blockers, "web_target must be a non-empty DNS name")
@@ -294,27 +302,30 @@ func reconcileDomain(domain string, cfg DomainIntent, snapshots []record.Snapsho
 		})
 	}
 	if strings.TrimSpace(cfg.ForwardTo) != "" {
-		resource := resourceName("cf-redirect", domain)
 		targetURL := strings.TrimSpace(cfg.ForwardTo)
-		report.Actions = append(report.Actions, Action{
-			Type:      "configure_redirect",
-			Provider:  "cloudflare",
-			Resource:  resource,
-			TargetURL: targetURL,
-		})
-		modules = append(modules, config.ModuleConfig{
-			Name: resource,
-			Type: "infra.http_redirect",
-			Config: map[string]any{
-				"provider":              "cloudflare",
-				"domain":                domain,
-				"from_host":             domain,
-				"target_url":            targetURL,
-				"status_code":           301,
-				"preserve_path":         true,
-				"preserve_query_string": true,
-			},
-		})
+		for _, host := range sortedForwardHosts(forwardHostSet(domain, cfg)) {
+			resource := resourceName("cf-redirect", host.fqdn)
+			report.Actions = append(report.Actions, Action{
+				Type:      "configure_redirect",
+				Provider:  "cloudflare",
+				Resource:  resource,
+				TargetURL: targetURL,
+				FromHost:  host.fqdn,
+			})
+			modules = append(modules, config.ModuleConfig{
+				Name: resource,
+				Type: "infra.http_redirect",
+				Config: map[string]any{
+					"provider":              "cloudflare",
+					"domain":                domain,
+					"from_host":             host.fqdn,
+					"target_url":            targetURL,
+					"status_code":           301,
+					"preserve_path":         true,
+					"preserve_query_string": true,
+				},
+			})
+		}
 	}
 	if cfg.NameserverCutover {
 		resource := resourceName(registrar+"-delegation", domain)
@@ -421,6 +432,14 @@ func buildBundle(results []compileResult, stateDir string) *Bundle {
 
 func planRecords(domain string, cfg DomainIntent, policy string, group []record.Snapshot, cfSnapshot record.Snapshot) recordPlan {
 	hoverSnapshot, hasHover := firstSnapshotByProvider(group, "hover")
+	withForwardTo := func(plan recordPlan) recordPlan {
+		if len(plan.blockers) > 0 || strings.TrimSpace(cfg.ForwardTo) == "" {
+			return plan
+		}
+		plan.records = applyForwardPlaceholderRecords(domain, plan.records, cfg)
+		plan.manageUnlisted = true
+		return plan
+	}
 	withWebTarget := func(plan recordPlan) recordPlan {
 		if len(plan.blockers) > 0 || strings.TrimSpace(cfg.WebTarget) == "" {
 			return plan
@@ -432,27 +451,27 @@ func planRecords(domain string, cfg DomainIntent, policy string, group []record.
 	switch policy {
 	case "discard_parked":
 		if hasHover && parkedHoverRecords(hoverSnapshot.Records) {
-			return withWebTarget(discardParkedPlan(domain, cfg, hoverSnapshot.Records))
+			return withForwardTo(withWebTarget(discardParkedPlan(domain, cfg, hoverSnapshot.Records)))
 		}
 		if cfg.AllowDiscardNonparked {
 			if selected, ok := selectSource(group); ok {
-				return withWebTarget(discardParkedPlan(domain, cfg, selected.Records))
+				return withForwardTo(withWebTarget(discardParkedPlan(domain, cfg, selected.Records)))
 			}
 			return recordPlan{blockers: []string{"no portfolio snapshot available for records"}}
 		}
 		return recordPlan{blockers: []string{"records_policy discard_parked requested but Hover records do not match parked-record pattern"}}
 	case "preserve_authoritative":
 		if selected, ok := selectSource(group); ok {
-			return withWebTarget(recordPlan{records: cloudflareRecords(domain, cloudflarerecords.EffectiveRecordSource(domain, group, selected, selected.Records, func(snapshot record.Snapshot) int {
+			return withForwardTo(withWebTarget(recordPlan{records: cloudflareRecords(domain, cloudflarerecords.EffectiveRecordSource(domain, group, selected, selected.Records, func(snapshot record.Snapshot) int {
 				return sourceRank(snapshot, group)
-			}))})
+			}))}))
 		}
 		return recordPlan{blockers: []string{"no portfolio snapshot available for records"}}
 	case "preserve_cloudflare":
 		if cfSnapshot.Provider != "" {
-			return withWebTarget(recordPlan{records: cloudflareRecords(domain, cloudflarerecords.EffectiveRecordSource(domain, group, cfSnapshot, cfSnapshot.Records, func(snapshot record.Snapshot) int {
+			return withForwardTo(withWebTarget(recordPlan{records: cloudflareRecords(domain, cloudflarerecords.EffectiveRecordSource(domain, group, cfSnapshot, cfSnapshot.Records, func(snapshot record.Snapshot) int {
 				return sourceRank(snapshot, group)
-			}))})
+			}))}))
 		}
 		return recordPlan{blockers: []string{"records_policy preserve_cloudflare requested but no Cloudflare snapshot exists"}}
 	default:
@@ -482,14 +501,84 @@ func redirectProxyRecordsIfNeeded(domain string, cfg DomainIntent) []map[string]
 	if strings.TrimSpace(cfg.ForwardTo) == "" {
 		return []map[string]any{}
 	}
-	return []map[string]any{{
-		"type":    "A",
-		"name":    "@",
-		"data":    "192.0.2.1",
-		"ttl":     1,
-		"proxied": true,
-		"comment": "Originless placeholder for Cloudflare redirect rules",
-	}}
+	return forwardPlaceholderRecords(domain, cfg)
+}
+
+func applyForwardPlaceholderRecords(domain string, records []map[string]any, cfg DomainIntent) []map[string]any {
+	hosts := forwardHostSet(domain, cfg)
+	labels := hostsToLabels(hosts)
+	out := make([]map[string]any, 0, len(records)+len(hosts))
+	for _, item := range records {
+		if isWebRecordForHost(domain, item, labels) {
+			continue
+		}
+		out = append(out, item)
+	}
+	out = append(out, forwardPlaceholderRecords(domain, cfg)...)
+	sort.SliceStable(out, func(i, j int) bool {
+		return recordKey(out[i]) < recordKey(out[j])
+	})
+	return out
+}
+
+func forwardPlaceholderRecords(domain string, cfg DomainIntent) []map[string]any {
+	hosts := sortedForwardHosts(forwardHostSet(domain, cfg))
+	out := make([]map[string]any, 0, len(hosts))
+	for _, host := range hosts {
+		out = append(out, map[string]any{
+			"type":    "A",
+			"name":    host.label,
+			"data":    "192.0.2.1",
+			"ttl":     1,
+			"proxied": true,
+			"comment": "Originless placeholder for Cloudflare redirect rules",
+		})
+	}
+	return out
+}
+
+type forwardHost struct {
+	label string
+	fqdn  string
+}
+
+func forwardHostSet(domain string, cfg DomainIntent) map[string]forwardHost {
+	values := cfg.ForwardHosts
+	if len(values) == 0 {
+		values = []string{"@"}
+	}
+	hosts := map[string]forwardHost{}
+	for _, value := range values {
+		label := normalizeWebHost(domain, value)
+		if label == "" {
+			continue
+		}
+		fqdn := domain
+		if label != "@" {
+			fqdn = label + "." + domain
+		}
+		hosts[label] = forwardHost{label: label, fqdn: fqdn}
+	}
+	return hosts
+}
+
+func sortedForwardHosts(hosts map[string]forwardHost) []forwardHost {
+	out := make([]forwardHost, 0, len(hosts))
+	for _, host := range hosts {
+		out = append(out, host)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].fqdn < out[j].fqdn
+	})
+	return out
+}
+
+func hostsToLabels(hosts map[string]forwardHost) map[string]bool {
+	out := make(map[string]bool, len(hosts))
+	for label := range hosts {
+		out[label] = true
+	}
+	return out
 }
 
 func applyWebTarget(domain string, records []map[string]any, cfg DomainIntent) []map[string]any {

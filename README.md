@@ -33,13 +33,21 @@ policy check, matching the old adoption behavior while keeping generic
 
 The previous per-provider DNS adapter pages (`docs/providers/*.md`) and the `infra.dns_record` step type were removed in v1.0.0; the legacy step's peer-dispatch model was architecturally unsupported (see `docs/plans/2026-05-26-dns-provider-contract-design.md`).
 
-Domain intent may also include `forward_to` for redirect-only domains moving to
-Cloudflare DNS. The compiler emits:
+Domain intent may also include `forward_to` for domains whose public web hosts
+should redirect through Cloudflare. `forward_hosts` optionally scopes the
+redirected hostnames and defaults to `@`; each value may be `@`, a relative
+hostname such as `www`, or an in-zone FQDN such as `www.example.com`. The
+compiler emits:
 
-- a Cloudflare `infra.dns` resource containing an originless proxied `A @
-  192.0.2.1` placeholder when `records_policy: discard_parked` is used; and
-- a Cloudflare `infra.http_redirect` resource targeting `forward_to`, preserving
-  path and query string by default.
+- a Cloudflare `infra.dns` resource that replaces existing `A`, `AAAA`, and
+  `CNAME` records for only `forward_hosts` with originless proxied `A`
+  placeholders pointing at `192.0.2.1`; and
+- one Cloudflare `infra.http_redirect` resource per forwarded host targeting
+  `forward_to`, preserving path and query string by default.
+
+Hosts outside `forward_hosts` are preserved, so a zone can redirect apex/`www`
+while leaving names such as `admin` or `*.preview` routed to their existing
+origin.
 
 Domain intent may include `web_target` for domains whose authoritative zone is
 being moved to Cloudflare while web hosting is moving to another platform. When
