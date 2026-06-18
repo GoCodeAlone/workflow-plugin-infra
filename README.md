@@ -53,6 +53,11 @@ Generated Cloudflare DNS resources default website-capable `A`, `AAAA`, and
 `CNAME` records to `proxied: true` so moved zones keep Cloudflare edge features.
 Mail/service hostnames such as `mail`, `smtp`, `imap`, `autodiscover`,
 underscore-prefixed service records, and in-zone MX targets are kept DNS-only.
+Known registrar parking web records, such as Hover's `216.40.34.41` parking
+addresses and Namecheap's `parkingpage.namecheap.com`, are not preserved during
+Cloudflare staging. If another provider snapshot contains non-parked web
+records for the same zone, those records are carried forward instead while
+mail, MX, TXT, and other non-web records remain intact.
 Domain intent can set `manage_unlisted: true` for corrective cutovers where
 stale provider records should be deleted after the intended record set is known.
 

@@ -808,6 +808,78 @@ func TestCompilePreserveAuthoritativeDefaultsProxiableRecordsToProxied(t *testin
 	}
 }
 
+func TestCompileReplacesParkedWebRecordsWithAlternateLiveSource(t *testing.T) {
+	dir := t.TempDir()
+	intentPath := writeTestFile(t, dir, "domains.json", `{
+  "schema": "workflow.domain-intent.v1",
+  "domains": {
+    "example.com": {
+      "registrar": "hover",
+      "dns_host": "cloudflare",
+      "stage_dns": true
+    }
+  }
+}`)
+	portfolioPath := writeTestFile(t, dir, "portfolio.json", `{
+  "schema": "workflow.dns-portfolio.export.v1",
+  "snapshots": [
+    {
+      "id": "cf",
+      "provider": "cloudflare",
+      "domain": "example.com",
+      "authority": {"name_servers": ["a.ns.cloudflare.com", "b.ns.cloudflare.com"]},
+      "records": [
+        {"type": "A", "name": "example.com", "value": "216.40.34.41", "ttl": 900},
+        {"type": "A", "name": "*.example.com", "value": "216.40.34.41", "ttl": 900},
+        {"type": "CNAME", "name": "mail.example.com", "value": "mail.hover.com.cust.hostedemail.com", "ttl": 900},
+        {"type": "MX", "name": "example.com", "value": "10 mx.hover.com.cust.hostedemail.com", "ttl": 900}
+      ]
+    },
+    {
+      "id": "hover",
+      "provider": "hover",
+      "domain": "example.com",
+      "authority": {"live_nameservers": ["a.ns.cloudflare.com", "b.ns.cloudflare.com"], "registrar_nameservers": ["a.ns.cloudflare.com", "b.ns.cloudflare.com"]},
+      "records": []
+    },
+    {
+      "id": "do",
+      "provider": "digitalocean",
+      "domain": "example.com",
+      "authority": {"name_servers": ["ns1.digitalocean.com", "ns2.digitalocean.com", "ns3.digitalocean.com"]},
+      "records": [
+        {"type": "A", "name": "@", "value": "203.0.113.20", "ttl": 1800},
+        {"type": "NS", "name": "@", "value": "ns1.digitalocean.com", "ttl": 1800},
+        {"type": "SOA", "name": "@", "value": "ns1.digitalocean.com hostmaster.example.com 1 10800 3600 604800 1800", "ttl": 1800}
+      ]
+    }
+  ]
+}`)
+
+	bundle, err := Compile(Options{IntentPath: intentPath, PortfolioGlobs: []string{portfolioPath}})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	got := moduleByName(bundle.Config.Modules, "cf-example-com")
+	if got == nil {
+		t.Fatalf("missing generated Cloudflare module: %+v", bundle.Config.Modules)
+	}
+	records := got.Config["records"].([]map[string]any)
+	if parked := recordByTypeData(records, "A", "216.40.34.41"); parked != nil {
+		t.Fatalf("parked A record preserved: %#v in %#v", parked, records)
+	}
+	apex := recordByTypeName(records, "A", "@")
+	if apex == nil || apex["data"] != "203.0.113.20" || apex["proxied"] != true {
+		t.Fatalf("apex A = %#v, want proxied DigitalOcean record", apex)
+	}
+	if mail := recordByTypeData(records, "CNAME", "mail.hover.com.cust.hostedemail.com"); mail == nil {
+		t.Fatalf("mail CNAME = %#v, want preserved Hover mail target in %#v", mail, records)
+	}
+	if mx := recordByTypeData(records, "MX", "mx.hover.com.cust.hostedemail.com"); mx == nil {
+		t.Fatalf("MX = %#v, want preserved Hover MX", mx)
+	}
+}
+
 func TestCompilePreserveAuthoritativeKeepsApexMXTargetDNSOnly(t *testing.T) {
 	dir := t.TempDir()
 	intentPath := writeTestFile(t, dir, "domains.json", `{
@@ -908,6 +980,15 @@ func managedMarkerRecord(records []map[string]any) map[string]any {
 func recordByTypeName(records []map[string]any, recType, name string) map[string]any {
 	for _, record := range records {
 		if record["type"] == recType && record["name"] == name {
+			return record
+		}
+	}
+	return nil
+}
+
+func recordByTypeData(records []map[string]any, recType, data string) map[string]any {
+	for _, record := range records {
+		if record["type"] == recType && record["data"] == data {
 			return record
 		}
 	}

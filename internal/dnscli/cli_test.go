@@ -88,8 +88,11 @@ func TestRunDNSStageCloudflareWritesConfigAndReport(t *testing.T) {
 		t.Fatalf("module type = %q, want infra.dns", dns.Type)
 	}
 	records, ok := dns.Config["records"].([]any)
-	if !ok || len(records) != 4 || !hasYAMLManagedMarker(records) {
-		t.Fatalf("records = %#v, want A+MX+TXT plus managed marker", dns.Config["records"])
+	if !ok || len(records) != 3 || !hasYAMLManagedMarker(records) {
+		t.Fatalf("records = %#v, want MX+TXT plus managed marker without parked A", dns.Config["records"])
+	}
+	if hasYAMLRecordData(records, "A", "@", "216.40.34.41") {
+		t.Fatalf("records = %#v, should not preserve parked Hover A", records)
 	}
 	if !hasYAMLRecordData(records, "TXT", "@", `"google-site-verification=abc123"`) {
 		t.Fatalf("TXT records = %#v, want quoted google-site-verification data", records)

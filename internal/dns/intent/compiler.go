@@ -442,12 +442,12 @@ func planRecords(domain string, cfg DomainIntent, policy string, group []record.
 		return recordPlan{blockers: []string{"records_policy discard_parked requested but Hover records do not match parked-record pattern"}}
 	case "preserve_authoritative":
 		if selected, ok := selectSource(group); ok {
-			return withWebTarget(recordPlan{records: cloudflareRecords(domain, selected.Records)})
+			return withWebTarget(recordPlan{records: cloudflareRecords(domain, effectiveRecordSource(domain, group, selected))})
 		}
 		return recordPlan{blockers: []string{"no portfolio snapshot available for records"}}
 	case "preserve_cloudflare":
 		if cfSnapshot.Provider != "" {
-			return withWebTarget(recordPlan{records: cloudflareRecords(domain, cfSnapshot.Records)})
+			return withWebTarget(recordPlan{records: cloudflareRecords(domain, effectiveRecordSource(domain, group, cfSnapshot))})
 		}
 		return recordPlan{blockers: []string{"records_policy preserve_cloudflare requested but no Cloudflare snapshot exists"}}
 	default:
@@ -613,6 +613,37 @@ func selectSource(group []record.Snapshot) (record.Snapshot, bool) {
 	return group[0], true
 }
 
+func effectiveRecordSource(domain string, group []record.Snapshot, selected record.Snapshot) []record.Record {
+	records := stripParkedWebRecords(domain, selected.Records)
+	if len(records) == len(selected.Records) {
+		return records
+	}
+	webKeys := map[string]bool{}
+	for _, rec := range records {
+		if key, ok := webRecordKey(domain, rec); ok {
+			webKeys[key] = true
+		}
+	}
+	alternates := append([]record.Snapshot(nil), group...)
+	sort.SliceStable(alternates, func(i, j int) bool {
+		return sourceRank(alternates[i], group) < sourceRank(alternates[j], group)
+	})
+	for _, snapshot := range alternates {
+		if snapshot.Provider == selected.Provider && snapshot.ID == selected.ID {
+			continue
+		}
+		for _, rec := range snapshot.Records {
+			key, ok := webRecordKey(domain, rec)
+			if !ok || webKeys[key] || isParkedWebRecord(domain, rec) {
+				continue
+			}
+			records = append(records, rec)
+			webKeys[key] = true
+		}
+	}
+	return records
+}
+
 func sourceRank(snapshot record.Snapshot, group []record.Snapshot) int {
 	provider := strings.ToLower(snapshot.Provider)
 	authorityProvider := nameserverProvider(snapshot)
@@ -767,6 +798,45 @@ func parkedHoverRecords(records []record.Record) bool {
 	return true
 }
 
+func stripParkedWebRecords(domain string, records []record.Record) []record.Record {
+	out := make([]record.Record, 0, len(records))
+	for _, rec := range records {
+		if isParkedWebRecord(domain, rec) {
+			continue
+		}
+		out = append(out, rec)
+	}
+	return out
+}
+
+func isParkedWebRecord(domain string, rec record.Record) bool {
+	recType := strings.ToUpper(rec.Type)
+	name := normalizeWebHost(domain, defaultName(rec.Name))
+	value := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(rec.Value)), ".")
+	switch recType {
+	case "A":
+		return (name == "@" || name == "*") && value == "216.40.34.41"
+	case "CNAME":
+		return (name == "@" || name == "www") && value == "parkingpage.namecheap.com"
+	default:
+		return false
+	}
+}
+
+func webRecordKey(domain string, rec record.Record) (string, bool) {
+	recType := strings.ToUpper(rec.Type)
+	switch recType {
+	case "A", "AAAA", "CNAME":
+	default:
+		return "", false
+	}
+	name := normalizeWebHost(domain, defaultName(rec.Name))
+	if name == "" || defaultDNSOnlyName(name) {
+		return "", false
+	}
+	return recType + "\x00" + name, true
+}
+
 func cloudflareRecords(domain string, records []record.Record) []map[string]any {
 	out := make([]map[string]any, 0, len(records))
 	seen := map[string]bool{}
@@ -851,6 +921,15 @@ func cloudflareDNSOnlyNames(domain string, records []record.Record) map[string]b
 		}
 	}
 	return names
+}
+
+func defaultDNSOnlyName(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "autoconfig", "autodiscover", "email", "imap", "mail", "pop", "pop3", "smtp", "webmail":
+		return true
+	default:
+		return false
+	}
 }
 
 func shouldProxyCloudflareRecord(recType, name string, dnsOnlyNames map[string]bool) bool {

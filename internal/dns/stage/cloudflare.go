@@ -207,6 +207,7 @@ func buildStagedDomain(domain string, group []record.Snapshot, stateDir string) 
 	if strings.EqualFold(source.Provider, "cloudflare") && currentAuthoritySource.Provider != "" && !strings.EqualFold(currentAuthoritySource.Provider, "cloudflare") {
 		recordSource = append(append([]record.Record(nil), source.Records...), currentAuthoritySource.Records...)
 	}
+	recordSource = effectiveRecordSource(domain, group, source, recordSource)
 	records := managedmarker.Append(cloudflareRecords(domain, recordSource), stateDir, resource)
 	report := CloudflareDomainReport{
 		Domain:                   domain,
@@ -309,6 +310,37 @@ func sourceRank(snapshot record.Snapshot, group []record.Snapshot) int {
 	default:
 		return 9
 	}
+}
+
+func effectiveRecordSource(domain string, group []record.Snapshot, selected record.Snapshot, selectedRecords []record.Record) []record.Record {
+	records := stripParkedWebRecords(domain, selectedRecords)
+	if len(records) == len(selectedRecords) {
+		return records
+	}
+	webKeys := map[string]bool{}
+	for _, rec := range records {
+		if key, ok := webRecordKey(domain, rec); ok {
+			webKeys[key] = true
+		}
+	}
+	alternates := append([]record.Snapshot(nil), group...)
+	sort.SliceStable(alternates, func(i, j int) bool {
+		return sourceRank(alternates[i], group) < sourceRank(alternates[j], group)
+	})
+	for _, snapshot := range alternates {
+		if snapshot.Provider == selected.Provider && snapshot.ID == selected.ID {
+			continue
+		}
+		for _, rec := range snapshot.Records {
+			key, ok := webRecordKey(domain, rec)
+			if !ok || webKeys[key] || isParkedWebRecord(domain, rec) {
+				continue
+			}
+			records = append(records, rec)
+			webKeys[key] = true
+		}
+	}
+	return records
 }
 
 func hoverDelegatesTo(group []record.Snapshot, provider string) bool {
@@ -427,6 +459,45 @@ func cloudflareRecords(domain string, records []record.Record) []map[string]any 
 	return items
 }
 
+func stripParkedWebRecords(domain string, records []record.Record) []record.Record {
+	out := make([]record.Record, 0, len(records))
+	for _, rec := range records {
+		if isParkedWebRecord(domain, rec) {
+			continue
+		}
+		out = append(out, rec)
+	}
+	return out
+}
+
+func isParkedWebRecord(domain string, rec record.Record) bool {
+	recType := strings.ToUpper(rec.Type)
+	name := cloudflareRecordName(domain, rec.Name)
+	value := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(rec.Value)), ".")
+	switch recType {
+	case "A":
+		return (name == "@" || name == "*") && value == "216.40.34.41"
+	case "CNAME":
+		return (name == "@" || name == "www") && value == "parkingpage.namecheap.com"
+	default:
+		return false
+	}
+}
+
+func webRecordKey(domain string, rec record.Record) (string, bool) {
+	recType := strings.ToUpper(rec.Type)
+	switch recType {
+	case "A", "AAAA", "CNAME":
+	default:
+		return "", false
+	}
+	name := cloudflareRecordName(domain, rec.Name)
+	if name == "" || defaultDNSOnlyName(name) {
+		return "", false
+	}
+	return recType + "\x00" + name, true
+}
+
 func cloudflareDNSOnlyNames(domain string, records []record.Record) map[string]bool {
 	names := map[string]bool{
 		"autoconfig":   true,
@@ -459,6 +530,15 @@ func cloudflareDNSOnlyNames(domain string, records []record.Record) map[string]b
 		}
 	}
 	return names
+}
+
+func defaultDNSOnlyName(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "autoconfig", "autodiscover", "email", "imap", "mail", "pop", "pop3", "smtp", "webmail":
+		return true
+	default:
+		return false
+	}
 }
 
 func shouldProxyCloudflareRecord(recType, name string, dnsOnlyNames map[string]bool) bool {
