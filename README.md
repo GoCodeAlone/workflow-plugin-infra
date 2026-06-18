@@ -61,6 +61,10 @@ Generated Cloudflare DNS resources default website-capable `A`, `AAAA`, and
 `CNAME` records to `proxied: true` so moved zones keep Cloudflare edge features.
 Mail/service hostnames such as `mail`, `smtp`, `imap`, `autodiscover`,
 underscore-prefixed service records, and in-zone MX targets are kept DNS-only.
+When Cloudflare portfolio imports include explicit proxy state, preserved
+Cloudflare records keep that value. Domain intent can override individual hosts
+with `dns_only_hosts` or `proxied_hosts`; entries may be relative labels such as
+`www`, apex `@`, or fully qualified names such as `www.example.com`.
 Known registrar parking web records, such as Hover's `216.40.34.41` parking
 addresses and Namecheap's `parkingpage.namecheap.com`, are not preserved during
 Cloudflare staging. If another provider snapshot contains non-parked web

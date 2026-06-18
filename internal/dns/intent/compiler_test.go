@@ -965,6 +965,111 @@ func TestCompilePreserveAuthoritativeDefaultsProxiableRecordsToProxied(t *testin
 	}
 }
 
+func TestCompilePreservesImportedCloudflareProxyState(t *testing.T) {
+	dir := t.TempDir()
+	intentPath := writeTestFile(t, dir, "domains.json", `{
+  "schema": "workflow.domain-intent.v1",
+  "domains": {
+    "example.com": {
+      "registrar": "manual",
+      "dns_host": "cloudflare",
+      "stage_dns": true,
+      "records_policy": "preserve_cloudflare"
+    }
+  }
+}`)
+	portfolioPath := writeTestFile(t, dir, "portfolio.json", `{
+  "schema": "workflow.dns-portfolio.export.v1",
+  "snapshots": [
+    {
+      "id": "cf",
+      "provider": "cloudflare",
+      "domain": "example.com",
+      "authority": {"name_servers": ["a.ns.cloudflare.com", "b.ns.cloudflare.com"]},
+      "records": [
+        {"type": "A", "name": "@", "value": "192.0.2.10", "ttl": 300, "proxied": false, "proxiable": true},
+        {"type": "CNAME", "name": "www", "value": "example.com", "ttl": 300, "proxied": true, "proxiable": true}
+      ]
+    }
+  ]
+}`)
+
+	bundle, err := Compile(Options{IntentPath: intentPath, PortfolioGlobs: []string{portfolioPath}})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	got := moduleByName(bundle.Config.Modules, "cf-example-com")
+	if got == nil {
+		t.Fatalf("missing generated Cloudflare module: %+v", bundle.Config.Modules)
+	}
+	records := got.Config["records"].([]map[string]any)
+	apex := recordByTypeName(records, "A", "@")
+	if apex == nil || apex["proxied"] != false {
+		t.Fatalf("apex record = %#v, want explicit proxied false", apex)
+	}
+	www := recordByTypeName(records, "CNAME", "www")
+	if www == nil || www["proxied"] != true {
+		t.Fatalf("www record = %#v, want explicit proxied true", www)
+	}
+}
+
+func TestCompileDNSOnlyHostsForceProxyOff(t *testing.T) {
+	dir := t.TempDir()
+	intentPath := writeTestFile(t, dir, "domains.json", `{
+  "schema": "workflow.domain-intent.v1",
+  "domains": {
+    "example.com": {
+      "registrar": "manual",
+      "dns_host": "cloudflare",
+      "stage_dns": true,
+      "dns_only_hosts": ["@", "www"]
+    }
+  }
+}`)
+	portfolioPath := writeTestFile(t, dir, "portfolio.json", `{
+  "schema": "workflow.dns-portfolio.export.v1",
+  "snapshots": [
+    {"id": "cf", "provider": "cloudflare", "domain": "example.com", "authority": {"name_servers": ["a.ns.cloudflare.com", "b.ns.cloudflare.com"]}},
+    {
+      "id": "do",
+      "provider": "digitalocean",
+      "domain": "example.com",
+      "records": [
+        {"type": "A", "name": "@", "value": "192.0.2.10", "ttl": 300},
+        {"type": "CNAME", "name": "www", "value": "example.com", "ttl": 300},
+        {"type": "CNAME", "name": "app", "value": "example.com", "ttl": 300}
+      ]
+    }
+  ]
+}`)
+
+	bundle, err := Compile(Options{IntentPath: intentPath, PortfolioGlobs: []string{portfolioPath}})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	got := moduleByName(bundle.Config.Modules, "cf-example-com")
+	if got == nil {
+		t.Fatalf("missing generated Cloudflare module: %+v", bundle.Config.Modules)
+	}
+	records := got.Config["records"].([]map[string]any)
+	for _, tc := range []struct {
+		recordType string
+		host       string
+	}{
+		{"A", "@"},
+		{"CNAME", "www"},
+	} {
+		rec := recordByTypeName(records, tc.recordType, tc.host)
+		if rec == nil || rec["proxied"] != false {
+			t.Fatalf("%s %s record = %#v, want explicit proxied false", tc.recordType, tc.host, rec)
+		}
+	}
+	app := recordByTypeName(records, "CNAME", "app")
+	if app == nil || app["proxied"] != true {
+		t.Fatalf("app record = %#v, want default proxied true", app)
+	}
+}
+
 func TestCompileReplacesParkedWebRecordsWithAlternateLiveSource(t *testing.T) {
 	dir := t.TempDir()
 	intentPath := writeTestFile(t, dir, "domains.json", `{
