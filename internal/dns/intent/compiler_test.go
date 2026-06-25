@@ -721,6 +721,79 @@ func TestCompileWebTargetReplacesAuthoritativeWebRecords(t *testing.T) {
 	}
 }
 
+func TestCompileWebTargetWithDisjointForwardHosts(t *testing.T) {
+	dir := t.TempDir()
+	intentPath := writeTestFile(t, dir, "domains.json", `{
+  "schema": "workflow.domain-intent.v1",
+  "domains": {
+    "example.com": {
+      "registrar": "hover",
+      "dns_host": "cloudflare",
+      "stage_dns": true,
+      "web_target": "gocodealone-multisite-zeqkn.ondigitalocean.app",
+      "web_hosts": ["www"],
+      "forward_to": "https://www.example.com",
+      "forward_hosts": ["@"]
+    }
+  }
+}`)
+	portfolioPath := writeTestFile(t, dir, "portfolio.json", `{
+  "schema": "workflow.dns-portfolio.export.v1",
+  "snapshots": [
+    {
+      "id": "cf",
+      "provider": "cloudflare",
+      "domain": "example.com",
+      "authority": {"name_servers": ["a.ns.cloudflare.com", "b.ns.cloudflare.com"]},
+      "records": []
+    },
+    {
+      "id": "hover",
+      "provider": "hover",
+      "domain": "example.com",
+      "records": [
+        {"type": "A", "name": "@", "value": "185.230.63.171", "ttl": 900},
+        {"type": "CNAME", "name": "www", "value": "cdn1.wixdns.net", "ttl": 900},
+        {"type": "MX", "name": "@", "value": "10 mx.hover.com.cust.hostedemail.com", "ttl": 900}
+      ]
+    }
+  ]
+}`)
+
+	bundle, err := Compile(Options{IntentPath: intentPath, PortfolioGlobs: []string{portfolioPath}})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	if bundle.Report.BlockedDomains != 0 {
+		t.Fatalf("blocked domains = %d; report=%+v", bundle.Report.BlockedDomains, bundle.Report)
+	}
+	dns := moduleByName(bundle.Config.Modules, "cf-example-com")
+	if dns == nil {
+		t.Fatalf("missing generated Cloudflare module: %+v", bundle.Config.Modules)
+	}
+	records, ok := dns.Config["records"].([]map[string]any)
+	if !ok {
+		t.Fatalf("records = %T, want []map[string]any", dns.Config["records"])
+	}
+	apex := recordByTypeName(records, "A", "@")
+	if apex == nil || apex["data"] != "192.0.2.1" || apex["proxied"] != true {
+		t.Fatalf("apex redirect placeholder = %#v", apex)
+	}
+	www := recordByTypeName(records, "CNAME", "www")
+	if www == nil || www["data"] != "gocodealone-multisite-zeqkn.ondigitalocean.app" || www["proxied"] != true {
+		t.Fatalf("www web target = %#v", www)
+	}
+	if stale := recordByTypeName(records, "A", "@"); stale != nil && stale["data"] == "185.230.63.171" {
+		t.Fatalf("stale Wix apex record retained: %#v", stale)
+	}
+	if redirect := moduleByName(bundle.Config.Modules, "cf-redirect-example-com"); redirect == nil || redirect.Type != "infra.http_redirect" {
+		t.Fatalf("missing apex redirect module: %#v", redirect)
+	}
+	if redirect := moduleByName(bundle.Config.Modules, "cf-redirect-www-example-com"); redirect != nil {
+		t.Fatalf("www redirect must not be emitted: %#v", redirect)
+	}
+}
+
 func TestCompileDiscardParkedWebTargetPreservesNonWebRecords(t *testing.T) {
 	dir := t.TempDir()
 	intentPath := writeTestFile(t, dir, "domains.json", `{

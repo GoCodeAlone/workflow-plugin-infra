@@ -247,8 +247,8 @@ func reconcileDomain(domain string, cfg DomainIntent, snapshots []record.Snapsho
 		if desiredDNSHost != "cloudflare" {
 			blockers = append(blockers, "web_target is only supported for dns_host cloudflare")
 		}
-		if strings.TrimSpace(cfg.ForwardTo) != "" {
-			blockers = append(blockers, "web_target cannot be combined with forward_to")
+		if strings.TrimSpace(cfg.ForwardTo) != "" && webAndForwardHostsOverlap(domain, cfg) {
+			blockers = append(blockers, "web_target and forward_to host sets must not overlap")
 		}
 		if normalized := normalizeWebTarget(cfg.WebTarget); normalized == "" {
 			blockers = append(blockers, "web_target must be a non-empty DNS name")
@@ -581,6 +581,16 @@ func hostsToLabels(hosts map[string]forwardHost) map[string]bool {
 		out[label] = true
 	}
 	return out
+}
+
+func webAndForwardHostsOverlap(domain string, cfg DomainIntent) bool {
+	forwardHosts := hostsToLabels(forwardHostSet(domain, cfg))
+	for host := range webHostSet(domain, cfg) {
+		if forwardHosts[host] {
+			return true
+		}
+	}
+	return false
 }
 
 func applyWebTarget(domain string, records []map[string]any, cfg DomainIntent) []map[string]any {
