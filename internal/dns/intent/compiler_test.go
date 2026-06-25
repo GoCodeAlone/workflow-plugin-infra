@@ -783,8 +783,10 @@ func TestCompileWebTargetWithDisjointForwardHosts(t *testing.T) {
 	if www == nil || www["data"] != "gocodealone-multisite-zeqkn.ondigitalocean.app" || www["proxied"] != true {
 		t.Fatalf("www web target = %#v", www)
 	}
-	if stale := recordByTypeName(records, "A", "@"); stale != nil && stale["data"] == "185.230.63.171" {
-		t.Fatalf("stale Wix apex record retained: %#v", stale)
+	for _, record := range records {
+		if record["type"] == "A" && record["name"] == "@" && record["data"] == "185.230.63.171" {
+			t.Fatalf("stale Wix apex record retained: %#v", record)
+		}
 	}
 	if redirect := moduleByName(bundle.Config.Modules, "cf-redirect-example-com"); redirect == nil || redirect.Type != "infra.http_redirect" {
 		t.Fatalf("missing apex redirect module: %#v", redirect)
