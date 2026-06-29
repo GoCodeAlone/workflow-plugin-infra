@@ -1,7 +1,7 @@
 {
     "name": "workflow-plugin-infra",
     "version": "0.0.0",
-    "description": "Abstract infra.* module types (14 types) with IaCProvider delegation",
+    "description": "Plugin-owned infra.* module types (infra.admin, infra.http_redirect); generic infra.* resource types are owned by the workflow engine (>= v0.80.17) via its NewInfraModuleFactory",
     "author": "GoCodeAlone",
     "license": "MIT",
     "type": "external",
@@ -45,20 +45,7 @@
     "capabilities": {
         "configProvider": true,
         "moduleTypes": [
-            "infra.container_service",
-            "infra.k8s_cluster",
-            "infra.database",
-            "infra.cache",
-            "infra.vpc",
-            "infra.load_balancer",
-            "infra.dns",
             "infra.http_redirect",
-            "infra.registry",
-            "infra.api_gateway",
-            "infra.firewall",
-            "infra.iam_role",
-            "infra.storage",
-            "infra.certificate",
             "infra.admin"
         ],
         "stepTypes": [],

@@ -1,6 +1,8 @@
 // Package internal implements the workflow-plugin-infra external plugin,
-// providing abstract infra.* module types that delegate to an IaC provider,
-// plus the infra.admin module type that serves the infrastructure management SPA.
+// providing the plugin-owned infra.* module types (infra.http_redirect and
+// infra.admin). The generic infra.* resource types are owned by the workflow
+// engine (>= v0.80.17) via its NewInfraModuleFactory; this plugin no longer
+// re-declares them.
 package internal
 
 import (
@@ -34,24 +36,22 @@ type infraModuleDefinition struct {
 	createTyped   func(typeName, name string, config *anypb.Any) (sdk.ModuleInstance, error)
 }
 
+// infraModuleDefinitions holds ONLY the plugin-owned infra.* module types.
+// The generic infra.* resource types (infra.container_service, infra.database,
+// infra.cache, infra.vpc, infra.load_balancer, infra.dns, infra.registry,
+// infra.api_gateway, infra.firewall, infra.iam_role, infra.storage,
+// infra.certificate, infra.k8s_cluster, infra.autoscaling_group) are owned by
+// the workflow engine (>= v0.80.17) via module/infra_module.go's
+// NewInfraModuleFactory + the type list in plugins/infra/plugin.go. This plugin
+// must NOT re-declare them. Kept here: infra.http_redirect (DNS intent redirect
+// target, plugin-owned) and infra.admin (SPA admin contribution, registered
+// separately via infraAdminModuleType).
 var infraModuleDefinitions = []infraModuleDefinition{
-	typedInfraModuleDefinition("infra.container_service", "ContainerServiceConfig", &contracts.ContainerServiceConfig{}),
-	typedInfraModuleDefinition("infra.k8s_cluster", "K8SClusterConfig", &contracts.K8SClusterConfig{}),
-	typedInfraModuleDefinition("infra.database", "DatabaseConfig", &contracts.DatabaseConfig{}),
-	typedInfraModuleDefinition("infra.cache", "CacheConfig", &contracts.CacheConfig{}),
-	typedInfraModuleDefinition("infra.vpc", "VPCConfig", &contracts.VPCConfig{}),
-	typedInfraModuleDefinition("infra.load_balancer", "LoadBalancerConfig", &contracts.LoadBalancerConfig{}),
-	typedInfraModuleDefinition("infra.dns", "DNSConfig", &contracts.DNSConfig{}),
 	typedInfraModuleDefinition("infra.http_redirect", "HTTPRedirectConfig", &contracts.HTTPRedirectConfig{}),
-	typedInfraModuleDefinition("infra.registry", "RegistryConfig", &contracts.RegistryConfig{}),
-	typedInfraModuleDefinition("infra.api_gateway", "APIGatewayConfig", &contracts.APIGatewayConfig{}),
-	typedInfraModuleDefinition("infra.firewall", "FirewallConfig", &contracts.FirewallConfig{}),
-	typedInfraModuleDefinition("infra.iam_role", "IAMRoleConfig", &contracts.IAMRoleConfig{}),
-	typedInfraModuleDefinition("infra.storage", "StorageConfig", &contracts.StorageConfig{}),
-	typedInfraModuleDefinition("infra.certificate", "CertificateConfig", &contracts.CertificateConfig{}),
 }
 
-// infraTypes is the complete list of abstract infrastructure resource types.
+// infraTypes is the complete list of plugin-owned infrastructure resource types
+// (excludes the engine-owned generic infra.* types and the admin module).
 var infraTypes = moduleTypesFromDefinitions(infraModuleDefinitions)
 
 var infraContractRegistry = buildContractRegistry(infraModuleDefinitions)
@@ -74,7 +74,7 @@ func (p *infraPlugin) Manifest() sdk.PluginManifest {
 		Name:        "workflow-plugin-infra",
 		Version:     Version,
 		Author:      "GoCodeAlone",
-		Description: "Abstract infra.* module types (13 types) with IaCProvider delegation",
+		Description: "Plugin-owned infra.* module types (infra.admin, infra.http_redirect); generic infra.* resource types owned by the workflow engine",
 	}
 }
 
