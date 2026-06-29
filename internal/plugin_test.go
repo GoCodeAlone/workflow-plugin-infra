@@ -130,58 +130,143 @@ func TestContractRegistryDeclaresStrictModuleContracts(t *testing.T) {
 	}
 }
 
+// TestPluginDoesNotRegisterEngineOwnedInfraTypes is the migration guard:
+// the generic infra.* resource types are owned by the workflow engine
+// (>= v0.80.17, plugins/infra/plugin.go NewInfraModuleFactory). This plugin
+// must NOT re-declare them in ModuleTypes, TypedModuleTypes, CreateModule,
+// CreateTypedModule, or ContractRegistry. If this fails, the dedup regressed.
+func TestPluginDoesNotRegisterEngineOwnedInfraTypes(t *testing.T) {
+	engineOwned := []string{
+		"infra.container_service", "infra.k8s_cluster", "infra.database",
+		"infra.cache", "infra.vpc", "infra.load_balancer", "infra.dns",
+		"infra.registry", "infra.api_gateway", "infra.firewall",
+		"infra.iam_role", "infra.storage", "infra.certificate",
+		"infra.autoscaling_group",
+	}
+	plugin := NewInfraPlugin()
+
+	mt := plugin.(interface{ ModuleTypes() []string }).ModuleTypes()
+	tmt := plugin.(sdk.TypedModuleProvider).TypedModuleTypes()
+	declared := map[string]bool{}
+	for _, m := range append(append([]string(nil), mt...), tmt...) {
+		declared[m] = true
+	}
+	for _, ty := range engineOwned {
+		if declared[ty] {
+			t.Errorf("plugin must NOT declare engine-owned type %q (ModuleTypes=%v)", ty, mt)
+		}
+		if _, err := plugin.(sdk.ModuleProvider).CreateModule(ty, "x", nil); err == nil {
+			t.Errorf("CreateModule(%q) must fail (engine-owned), got nil err", ty)
+		}
+		if _, err := plugin.(sdk.TypedModuleProvider).CreateTypedModule(ty, "x", nil); err == nil {
+			t.Errorf("CreateTypedModule(%q) must fail (engine-owned), got nil err", ty)
+		}
+	}
+
+	registry := plugin.(sdk.ContractProvider).ContractRegistry()
+	for _, c := range registry.Contracts {
+		if c.Kind != pb.ContractKind_CONTRACT_KIND_MODULE {
+			continue
+		}
+		for _, ty := range engineOwned {
+			if c.ModuleType == ty {
+				t.Errorf("ContractRegistry must not carry engine-owned module contract %q", ty)
+			}
+		}
+	}
+
+	// plugin.json capabilities.moduleTypes must not advertise engine-owned types.
+	data, err := os.ReadFile(filepath.Join(filepath.Dir(mustCallerFile(t)), "..", "plugin.json"))
+	if err != nil {
+		t.Fatalf("read plugin.json: %v", err)
+	}
+	var manifest struct {
+		Capabilities struct {
+			ModuleTypes []string `json:"moduleTypes"`
+		} `json:"capabilities"`
+	}
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		t.Fatalf("parse plugin.json: %v", err)
+	}
+	advertised := map[string]bool{}
+	for _, m := range manifest.Capabilities.ModuleTypes {
+		advertised[m] = true
+	}
+	for _, ty := range engineOwned {
+		if advertised[ty] {
+			t.Errorf("plugin.json capabilities.moduleTypes must not advertise engine-owned type %q", ty)
+		}
+	}
+}
+
+func mustCallerFile(t *testing.T) string {
+	t.Helper()
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	return file
+}
+
 func TestTypedModuleProviderValidatesTypedConfig(t *testing.T) {
 	provider := NewInfraPlugin().(sdk.TypedModuleProvider)
-	config, err := anypb.New(&contracts.DatabaseConfig{
-		Provider: "aws",
-		Region:   "us-east-1",
-		Engine:   "postgres",
+	// infra.http_redirect is plugin-owned (NOT engine-owned). The generic
+	// infra.* resource types (database, container_service, etc.) are now owned
+	// by the workflow engine (>= v0.80.17) and are validated there.
+	config, err := anypb.New(&contracts.HTTPRedirectConfig{
+		FromHost:  "example.com",
+		TargetUrl: "https://www.example.com",
 	})
 	if err != nil {
 		t.Fatalf("pack config: %v", err)
 	}
-	if _, err := provider.CreateTypedModule("infra.database", "db", config); err != nil {
+	if _, err := provider.CreateTypedModule("infra.http_redirect", "redirect", config); err != nil {
 		t.Fatalf("CreateTypedModule: %v", err)
 	}
 
-	wrongConfig, err := anypb.New(&contracts.ContainerServiceConfig{Image: "example/app:latest"})
+	wrongConfig, err := anypb.New(&contracts.InfraAdminConfig{ApiBasePath: "/api/infra"})
 	if err != nil {
 		t.Fatalf("pack wrong config: %v", err)
 	}
-	if _, err := provider.CreateTypedModule("infra.database", "db", wrongConfig); err == nil {
+	if _, err := provider.CreateTypedModule("infra.http_redirect", "redirect", wrongConfig); err == nil {
 		t.Fatal("CreateTypedModule accepted wrong typed config")
 	}
 }
 
-func TestTypedContainerServiceConfigMapsToLegacyModule(t *testing.T) {
+func TestTypedHTTPRedirectConfigMapsToLegacyModule(t *testing.T) {
+	// infra.http_redirect is plugin-owned (the generic infra.* resource types
+	// like container_service are now engine-owned). This test pins the typed
+	// config → legacy *infraModule map translation for the plugin-owned type.
 	provider := NewInfraPlugin().(sdk.TypedModuleProvider)
-	config, err := anypb.New(&contracts.ContainerServiceConfig{
-		Provider: "aws",
-		Region:   "us-east-1",
-		Image:    "example/app:latest",
-		Ports:    []int32{8080},
-		Env:      map[string]string{"APP_ENV": "test"},
+	config, err := anypb.New(&contracts.HTTPRedirectConfig{
+		Provider:            "cloudflare",
+		Region:              "global",
+		FromHost:            "example.com",
+		TargetUrl:           "https://www.example.com",
+		StatusCode:          301,
+		PreservePath:        true,
+		PreserveQueryString: true,
 	})
 	if err != nil {
 		t.Fatalf("pack config: %v", err)
 	}
-	module, err := provider.CreateTypedModule("infra.container_service", "app", config)
+	module, err := provider.CreateTypedModule("infra.http_redirect", "redirect", config)
 	if err != nil {
 		t.Fatalf("CreateTypedModule: %v", err)
 	}
 	typed, ok := module.(interface {
-		TypedConfig() *contracts.ContainerServiceConfig
+		TypedConfig() *contracts.HTTPRedirectConfig
 	})
 	if !ok {
-		t.Fatalf("module type = %T, want typed container service module", module)
+		t.Fatalf("module type = %T, want typed http_redirect module", module)
 	}
-	if got := typed.TypedConfig().GetImage(); got != "example/app:latest" {
-		t.Fatalf("image = %q, want example/app:latest", got)
+	if got := typed.TypedConfig().GetFromHost(); got != "example.com" {
+		t.Fatalf("from_host = %q, want example.com", got)
 	}
-	if got := typed.TypedConfig().GetProvider(); got != "aws" {
-		t.Fatalf("provider = %q, want aws", got)
+	if got := typed.TypedConfig().GetTargetUrl(); got != "https://www.example.com" {
+		t.Fatalf("target_url = %q, want https://www.example.com", got)
 	}
-	wrapped, ok := module.(*sdk.TypedModuleInstance[*contracts.ContainerServiceConfig])
+	wrapped, ok := module.(*sdk.TypedModuleInstance[*contracts.HTTPRedirectConfig])
 	if !ok {
 		t.Fatalf("module type = %T, want typed module wrapper", module)
 	}
@@ -189,19 +274,14 @@ func TestTypedContainerServiceConfigMapsToLegacyModule(t *testing.T) {
 	if !ok {
 		t.Fatalf("wrapped module type = %T, want *infraModule", wrapped.ModuleInstance)
 	}
-	if got := legacy.config["image"]; got != "example/app:latest" {
-		t.Fatalf("legacy image = %#v, want example/app:latest", got)
+	if got := legacy.config["from_host"]; got != "example.com" {
+		t.Fatalf("legacy from_host = %#v, want example.com", got)
 	}
-	if got := legacy.config["provider"]; got != "aws" {
-		t.Fatalf("legacy provider = %#v, want aws", got)
+	if got := legacy.config["target_url"]; got != "https://www.example.com" {
+		t.Fatalf("legacy target_url = %#v, want https://www.example.com", got)
 	}
-	ports, ok := legacy.config["ports"].([]any)
-	if !ok || len(ports) != 1 || ports[0] != float64(8080) {
-		t.Fatalf("legacy ports = %#v, want [8080]", legacy.config["ports"])
-	}
-	env, ok := legacy.config["env"].(map[string]any)
-	if !ok || env["APP_ENV"] != "test" {
-		t.Fatalf("legacy env = %#v, want APP_ENV=test", legacy.config["env"])
+	if got := legacy.config["status_code"]; got != float64(301) {
+		t.Fatalf("legacy status_code = %#v, want 301", got)
 	}
 }
 
