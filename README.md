@@ -10,6 +10,26 @@
 
 Abstract `infra.*` module types (13 total: `container_service`, `k8s_cluster`, `database`, `cache`, `vpc`, `load_balancer`, `dns`, `registry`, `api_gateway`, `firewall`, `iam_role`, `storage`, `certificate`) with `IaCProvider` delegation. The plugin itself defines no provider-specific behavior — module instances are resolved against the host's configured IaC provider (e.g. workflow-plugin-digitalocean, workflow-plugin-cloudflare).
 
+## Secrets boundary
+
+This plugin does not own secret storage, secret encryption, KMS integrations, or
+generic secret lifecycle management. Those remain split intentionally:
+
+- the workflow engine owns `secrets.vault`, `secrets.aws`,
+  `step.secret_fetch`, `step.secret_set`, `step.secret_rotate`, and
+  `step.iac_secret_reachability`;
+- `workflow-plugin-security` owns cryptographic/security controls such as
+  MFA, local encryption, AWS KMS, GCP KMS, and Vault Transit; and
+- this plugin only exposes four in-process secret-admin steps through
+  `NewInfraEnginePlugin`: `step.secret_list`, `step.secret_delete`,
+  `step.secret_vault_status`, and `step.secret_vault_test`.
+
+The secret-admin steps resolve an existing `workflow/secrets.Provider` from
+the host application's service registry by `module:`. They list, delete, or
+probe already-configured engine secret providers; they do not create backends,
+store secret values themselves, implement AWS/GCP/Vault clients, or appear in
+the external gRPC plugin manifest's `capabilities.stepTypes`.
+
 ## DNS handling (post-v1.0.0)
 
 Per-provider DNS support lives in the respective provider plugins (workflow-plugin-{digitalocean,cloudflare,namecheap,hover,...}), each implementing `infra.dns` against its native SDK. Capability-scoped DNS orchestration is exposed by this plugin as a top-level wfctl command:

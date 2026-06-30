@@ -5,7 +5,6 @@ const TAB_LABELS: Record<Tab, string> = {
   plan: 'Plan',
   commit: 'Commit / PR',
   drift: 'Drift',
-  secrets: 'Secrets',
 }
 
 interface LayoutProps {
@@ -15,7 +14,7 @@ interface LayoutProps {
 }
 
 export default function Layout({ tab, onTabChange, children }: LayoutProps) {
-  const tabs: Tab[] = ['resources', 'plan', 'commit', 'drift', 'secrets']
+  const tabs: Tab[] = ['resources', 'plan', 'commit', 'drift']
   return (
     <div className="app">
       <header className="app-header">

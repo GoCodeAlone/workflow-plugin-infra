@@ -4,7 +4,6 @@ import DriftView from './components/DriftView'
 import Layout from './components/Layout'
 import PlanPreview from './components/PlanPreview'
 import ResourceList from './components/ResourceList'
-import SecretsPanel from './components/SecretsPanel'
 import type { ResourceSpec, Tab } from './types'
 
 export default function App() {
@@ -29,7 +28,6 @@ export default function App() {
       )}
       {tab === 'commit' && <CommitPR specs={specs} />}
       {tab === 'drift' && <DriftView provider={provider} />}
-      {tab === 'secrets' && <SecretsPanel />}
     </Layout>
   )
 }
