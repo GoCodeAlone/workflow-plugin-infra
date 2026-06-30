@@ -1,7 +1,7 @@
 {
     "name": "workflow-plugin-infra",
     "version": "0.0.0",
-    "description": "Plugin-owned infra.* module types (infra.admin, infra.http_redirect); generic infra.* resource types are owned by the workflow engine (>= v0.80.17) via its NewInfraModuleFactory",
+    "description": "Plugin-owned infra.* module types (infra.admin, infra.http_redirect); generic infra.* resource types owned by the workflow engine (>= v0.80.17). In-process-only secret-admin steps (ADR 0056 dual-shape, served by NewInfraEnginePlugin not the gRPC binary): step.secret_list, step.secret_delete, step.secret_vault_status, step.secret_vault_test",
     "author": "GoCodeAlone",
     "license": "MIT",
     "type": "external",
