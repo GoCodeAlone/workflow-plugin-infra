@@ -50,9 +50,6 @@ import type {
   ReconcileResult,
   Resource,
   ResourceSpec,
-  SecretDeclareInput,
-  SecretDeclareResult,
-  SecretMeta,
 } from './types'
 
 declare global {
@@ -161,14 +158,4 @@ export function reconcile(provider: string): Promise<ReconcileResult> {
 export function getDrift(provider?: string): Promise<DriftResult> {
   const qs = provider ? `?provider=${encodeURIComponent(provider)}` : ''
   return request<DriftResult>('GET', `/drift${qs}`)
-}
-
-// ── Secrets ───────────────────────────────────────────────────────────────────
-
-export function listSecrets(): Promise<{ secrets: SecretMeta[] }> {
-  return request<{ secrets: SecretMeta[] }>('GET', '/secrets')
-}
-
-export function declareSecret(input: SecretDeclareInput): Promise<SecretDeclareResult> {
-  return request<SecretDeclareResult>('POST', '/secrets', input)
 }

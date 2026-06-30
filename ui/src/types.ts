@@ -122,24 +122,6 @@ export interface DriftResult {
   supported: boolean
 }
 
-// ── Secrets ───────────────────────────────────────────────────────────────────
-
-export interface SecretMeta {
-  name: string
-  backend: string
-  description: string
-}
-
-export interface SecretDeclareInput {
-  name: string
-  backend: string
-  value?: string
-}
-
-export interface SecretDeclareResult {
-  ok: boolean
-}
-
 // ── View tab names ────────────────────────────────────────────────────────────
 
-export type Tab = 'resources' | 'plan' | 'commit' | 'drift' | 'secrets'
+export type Tab = 'resources' | 'plan' | 'commit' | 'drift'

@@ -56,7 +56,6 @@ func adminContributionFromConfig(config map[string]any) map[string]any {
 			"infra:resource:read",
 			"infra:plan",
 			"infra:apply",
-			"infra:secret:write",
 			"infra:exec:direct",
 		}
 	}
